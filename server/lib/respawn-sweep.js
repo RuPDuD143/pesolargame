@@ -21,7 +21,7 @@
 const { LOCATIONS } = require('./ore-config');
 const nodeManager = require('./node-manager');
 
-const SWEEP_INTERVAL_MS = 1000;
+const SWEEP_INTERVAL_MS = 60000;
 
 function startRespawnSweep(db) {
   setInterval(async () => {
