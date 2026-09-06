@@ -49,7 +49,7 @@ export const CONFIG = {
   REGISTER_MEMO_PESOLAR: 'register::pesolar',
   // TODO: the URL Render gives you after deploying the server/ folder
   // there, e.g. 'https://pesolar-backend.onrender.com' (no trailing slash)
-  API_BASE_URL: 'https://pesolargame.onrender.com'
+  API_BASE_URL: 'https://pesolargame.rrlworlds1434.workers.dev/'
 };
 
 /**
