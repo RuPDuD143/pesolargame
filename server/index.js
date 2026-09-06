@@ -13,7 +13,9 @@
 
 const express = require('express');
 const cors = require('cors');
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore, Timestamp, FieldValue } = require('firebase-admin/firestore');
+const { getAuth } = require('firebase-admin/auth');
 
 const chain = require('./lib/chain');
 const { computeEnergyStatus } = require('./lib/energy');
@@ -27,6 +29,10 @@ const { startRespawnSweep } = require('./lib/respawn-sweep');
 // Firebase Admin init - reads the FULL service account JSON from an env
 // var (paste it as-is in Render's dashboard), so there's no file to
 // keep track of on disk.
+//
+// Note: firebase-admin v12+ dropped the old namespaced API
+// (admin.credential.cert, admin.firestore(), admin.auth()) - this uses
+// the current modular API instead.
 // ---------------------------------------------------------------------
 
 if (!process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
@@ -34,11 +40,12 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
   process.exit(1);
 }
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+initializeApp({
+  credential: cert(serviceAccount),
   projectId: serviceAccount.project_id
 });
-const db = admin.firestore();
+const db = getFirestore();
+const auth = getAuth();
 
 const app = express();
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
@@ -56,7 +63,7 @@ async function requireAuth(req, res, next) {
     const header = req.headers.authorization || '';
     const idToken = header.startsWith('Bearer ') ? header.slice(7) : null;
     if (!idToken) return res.status(401).json({ error: 'missing_id_token' });
-    const decoded = await admin.auth().verifyIdToken(idToken);
+    const decoded = await auth.verifyIdToken(idToken);
     req.account = decoded.uid; // uid === WAX account name (see verifyLoginAndMintToken below)
     next();
   } catch (err) {
@@ -99,7 +106,7 @@ app.post('/verifyLoginAndMintToken', async (req, res) => {
     return res.status(403).json({ error: 'signature_verification_failed' });
   }
   try {
-    const customToken = await admin.auth().createCustomToken(account);
+    const customToken = await auth.createCustomToken(account);
     res.json({ customToken });
   } catch (err) {
     console.error(err);
@@ -126,7 +133,7 @@ app.get('/getWorkerStatus', requireAuth, async (req, res) => {
     if (!snap.exists) {
       const fresh = {
         energy: energyMax,
-        lastrest: admin.firestore.Timestamp.now(),
+        lastrest: Timestamp.now(),
         isresting: false,
         coins: 0
       };
@@ -166,7 +173,7 @@ app.post('/wakeWorker', requireAuth, async (req, res) => {
     await ref.update({
       energy: status.currentEnergy,
       isresting: false,
-      lastrest: admin.firestore.Timestamp.now()
+      lastrest: Timestamp.now()
     });
 
     res.json({ registered: true, energyMax, isResting: false, currentEnergy: status.currentEnergy });
@@ -203,7 +210,7 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
       toX: finalX,
       toY: finalY,
       nodeId: nodeId || null,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: FieldValue.serverTimestamp()
     });
 
     if (!nodeId) return res.json({ struck: false }); // empty-ground throw, animation only
@@ -221,7 +228,7 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
       const sysSnap = await tx.get(sysdataRef);
       tx.update(sysdataRef, {
         minedResources: (sysSnap.data().minedResources || 0) + result.value,
-        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        lastUpdated: FieldValue.serverTimestamp()
       });
 
       const invRef = db.collection('workers').doc(account).collection('inventory').doc(result.oreType);
