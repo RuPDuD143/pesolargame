@@ -103,6 +103,91 @@ html, body {
   margin-left: 6px;
 }
 
+#world-location-label {
+  font-weight: bold;
+  letter-spacing: 0.5px;
+}
+
+.backpack-btn {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  z-index: 8;
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  border: 2px solid #d4af37;
+  background: #222;
+  font-size: 1.6rem;
+  cursor: pointer;
+}
+
+.backpack-panel {
+  position: fixed;
+  bottom: 78px;
+  left: 16px;
+  z-index: 8;
+  width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: #1c1c1c;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.backpack-panel.hidden {
+  display: none;
+}
+
+.backpack-panel h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.backpack-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid #333;
+}
+
+.backpack-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid #000;
+  flex-shrink: 0;
+}
+
+.backpack-name {
+  flex: 1;
+  text-transform: capitalize;
+}
+
+.backpack-amount {
+  font-weight: bold;
+}
+
+.fx-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+  pointer-events: none;
+}
+
+.fx-ore {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1px solid #000;
+  transform: translate(-50%, -50%) scale(0.4);
+  opacity: 1;
+  transition: left 0.6s ease-in, top 0.6s ease-in, transform 0.6s ease-in, opacity 0.3s ease-in 0.4s;
+}
+
 .world-toast {
   position: absolute;
   top: 10px;

@@ -29,6 +29,23 @@ async function getContractWorker(accountName) {
   return getTableRow({ code: CONTRACT_NAME, table: 'workers', scope: CONTRACT_NAME, key: accountName });
 }
 
+// throwPickaxe checks location eligibility (energy_max tier) on every
+// single strike, which would otherwise mean one chain RPC call per click.
+// Short TTL cache - a worker's on-chain energy_max only ever changes via
+// a real re-registration transfer, so a few seconds of staleness here is
+// harmless, and this is NOT used for anything security-critical beyond
+// "which caves can you currently swing a pickaxe in."
+const WORKER_CACHE_TTL_MS = 30000;
+const workerCache = new Map(); // accountName -> { row, expiresAt }
+
+async function getContractWorkerCached(accountName) {
+  const cached = workerCache.get(accountName);
+  if (cached && cached.expiresAt > Date.now()) return cached.row;
+  const row = await getContractWorker(accountName);
+  workerCache.set(accountName, { row, expiresAt: Date.now() + WORKER_CACHE_TTL_MS });
+  return row;
+}
+
 /**
  * Fetches an account's permissions (used to verify a login signature -
  * we need the account's real active-permission public key(s) from the
@@ -65,6 +82,7 @@ async function getAbi(accountName) {
 
 module.exports = {
   getContractWorker,
+  getContractWorkerCached,
   getTableRow,
   getAccount,
   getPermissionKeys,

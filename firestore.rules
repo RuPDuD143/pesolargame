@@ -20,6 +20,15 @@ service cloud.firestore {
       allow write: if false; // functions only
     }
 
+    // Doesn't inherit from the /workers/{account} match above - Firestore
+    // rules don't cascade into subcollections, so without this the
+    // backpack panel's onSnapshot() on workers/{account}/inventory would
+    // just fail with permission-denied.
+    match /workers/{account}/inventory/{oreType} {
+      allow read: if true;
+      allow write: if false; // functions only
+    }
+
     match /sysdata/{doc} {
       allow read: if true;
       allow write: if false;

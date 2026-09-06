@@ -1,5 +1,10 @@
 # Pesolar Mine — free-tier rewrite (no Blaze plan needed)
 
+> **See GAME_SPEC.md for the full design doc** (original spec + current
+> implementation status). Keep it updated when the design changes - it's
+> the actual persistence mechanism across chat sessions, since Claude
+> doesn't remember past conversations.
+
 This is the same game as the Cloud Functions version, with one change:
 **the backend no longer runs on Firebase Cloud Functions / Cloud Tasks**
 (both require the paid Blaze plan to deploy at all, even at $0 actual

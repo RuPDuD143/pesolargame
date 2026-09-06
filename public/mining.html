@@ -36,7 +36,7 @@
   <canvas id="canvas" width="800" height="800"></canvas>
 
   <script type="module">
-    import { mountMine } from './js/mining.js?v=5';
+    import { mountMine } from './js/mining.js?v=6';
 
     const canvas = document.getElementById('canvas');
     const toastEl = document.getElementById('toast');
@@ -46,7 +46,7 @@
       const account = document.getElementById('account').value.trim() || 'player1';
       const locationId = Number(document.getElementById('location').value);
       if (mine) mine.destroy();
-      mine = mountMine({ canvas, toastEl, account, locationId, spectator: false });
+      mine = mountMine({ canvas, toastEl, account, locationId, spectator: false, energyMax: 99999 });
     };
   </script>
 </body>

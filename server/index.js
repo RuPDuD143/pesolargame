@@ -22,7 +22,7 @@ const { computeEnergyStatus } = require('./lib/energy');
 const { requestLoginNonce, verifyLogin } = require('./lib/verify-signature');
 const nodeManager = require('./lib/node-manager');
 const { ORE_ASSET_IDS } = require('./lib/ore-asset-ids');
-const { LOCATIONS } = require('./lib/ore-config');
+const { LOCATIONS, LOCATION_MIN_ENERGY_MAX } = require('./lib/ore-config');
 const { startRespawnSweep } = require('./lib/respawn-sweep');
 
 // ---------------------------------------------------------------------
@@ -199,6 +199,21 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
     const { account, locationId, nodeId, charX, charY, targetX, targetY } = req.body || {};
     if (!requireClaimedAccount(req, res, account)) return;
     if (!(locationId in LOCATIONS)) return res.status(400).json({ error: 'bad_location' });
+
+    // Per GAME_SPEC.md: locations 1-5 require a minimum on-chain
+    // energy_max tier. Enforced here (not just hidden client-side) since
+    // a modified client could otherwise send a nodeId for any location
+    // regardless of what the UI shows. Uses the cached lookup - see the
+    // comment on getContractWorkerCached in lib/chain.js for why a short
+    // staleness window here is fine.
+    const requiredEnergyMax = LOCATION_MIN_ENERGY_MAX[locationId] || 0;
+    if (requiredEnergyMax > 0) {
+      const contractRow = await chain.getContractWorkerCached(account);
+      const energyMax = contractRow ? Number(contractRow.energy_max) : 0;
+      if (energyMax < requiredEnergyMax) {
+        return res.status(403).json({ error: 'location_locked', requiredEnergyMax });
+      }
+    }
 
     const dx = targetX - charX;
     const dy = targetY - charY;
