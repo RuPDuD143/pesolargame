@@ -13,6 +13,7 @@ const firebaseConfig = {
   storageBucket: "pesolargame.firebasestorage.app",
   messagingSenderId: "835487257937",
   appId: "1:835487257937:web:b1fcf57ff9753afa46af70"
+  databaseURL: "https://pesolargame-default-rtdb.firebaseio.com/"
 };
 
 // Fails loudly and immediately if this file ever gets deployed with the
