@@ -53,6 +53,7 @@ if (process.env.DEMO_MODE === 'true') {
 
 const app = express();
 app.use(cors({ origin: ['https://rupdud143.github.io', 'https://rupdud143.github.io/pesolargame', 'http://localhost:3000', 'http://127.0.0.1:3000'], credentials: true }));
+app.options('*', cors());
 app.use(express.json());
 
 // ---------------------------------------------------------------------
