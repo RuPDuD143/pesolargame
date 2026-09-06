@@ -5,8 +5,32 @@
 const RPC_ENDPOINT = process.env.RPC_ENDPOINT || 'https://wax.greymass.com';
 const CONTRACT_NAME = process.env.CONTRACT_NAME || 'pesolargame1';
 
+// Plain fetch() has no default timeout in Node - if the RPC endpoint
+// stalls (slow, overloaded, or blocking this server's IP specifically,
+// which can differ from what a browser sees), the caller just hangs
+// forever with nothing to catch and nothing to log. This wraps every
+// chain call so it fails loudly after RPC_TIMEOUT_MS instead, since a
+// clear timeout error is far easier to diagnose than an indefinitely
+// pending request (e.g. verifyLoginAndMintToken never resolving).
+const RPC_TIMEOUT_MS = Number(process.env.RPC_TIMEOUT_MS) || 8000;
+
+async function fetchWithTimeout(url, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`Chain RPC timed out after ${RPC_TIMEOUT_MS}ms: ${url}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getTableRow({ code, table, scope, key }) {
-  const res = await fetch(`${RPC_ENDPOINT}/v1/chain/get_table_rows`, {
+  const res = await fetchWithTimeout(`${RPC_ENDPOINT}/v1/chain/get_table_rows`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -52,7 +76,7 @@ async function getContractWorkerCached(accountName) {
  * chain, never trust a client-supplied key).
  */
 async function getAccount(accountName) {
-  const res = await fetch(`${RPC_ENDPOINT}/v1/chain/get_account`, {
+  const res = await fetchWithTimeout(`${RPC_ENDPOINT}/v1/chain/get_account`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ account_name: accountName })
@@ -70,7 +94,7 @@ async function getPermissionKeys(accountName, permissionName = 'active') {
 }
 
 async function getAbi(accountName) {
-  const res = await fetch(`${RPC_ENDPOINT}/v1/chain/get_abi`, {
+  const res = await fetchWithTimeout(`${RPC_ENDPOINT}/v1/chain/get_abi`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ account_name: accountName })
