@@ -26,12 +26,12 @@ export const CONFIG = {
   CONTRACT_NAME: 'pesolargame1',
   WAX_TOKEN_CONTRACT: 'eosio.token',
   REGISTER_COST_WAX: '100.00000000 WAX',
-  PESOLAR_TOKEN_CONTRACT: 'TODO_pesolar_token_contract',
+  PESOLAR_TOKEN_CONTRACT: 'pesolargame1',
   REGISTER_COST_PESOLAR: '10000.0000 PESOLAR',
   REGISTER_MEMO: 'register',
   // TODO: the URL Render gives you after deploying the server/ folder
   // there, e.g. 'https://pesolar-backend.onrender.com' (no trailing slash)
-  API_BASE_URL: 'TODO'
+  API_BASE_URL: 'https://pesolargame.onrender.com'
 };
 
 /**
