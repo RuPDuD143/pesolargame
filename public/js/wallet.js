@@ -19,7 +19,7 @@ import { WalletPluginCloudWallet } from 'https://esm.sh/@wharfkit/wallet-plugin-
 import { WalletPluginWombat } from 'https://esm.sh/@wharfkit/wallet-plugin-wombat@1?bundle';
 import { WebRenderer } from 'https://esm.sh/@wharfkit/web-renderer@1?bundle';
 
-import { CONFIG, auth, apiFetch, signInWithCustomToken } from './firebase-config.js';
+import { CONFIG, auth, apiFetch, signInWithCustomToken } from './firebase-config.js?v=4';
 import { onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js';
 
 // Firebase Auth persists its own session (IndexedDB, default persistence)
