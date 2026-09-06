@@ -20,6 +20,19 @@ import { WalletPluginWombat } from 'https://esm.sh/@wharfkit/wallet-plugin-womba
 import { WebRenderer } from 'https://esm.sh/@wharfkit/web-renderer@1?bundle';
 
 import { CONFIG, auth, apiFetch, signInWithCustomToken } from './firebase-config.js';
+import { onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js';
+
+// Firebase Auth persists its own session (IndexedDB, default persistence)
+// and silently refreshes ID tokens on its own - it doesn't need us to
+// mint a new custom token on every page load. onAuthStateChanged() fires
+// once, synchronously-ish, with whatever session Firebase already
+// restored from disk, before we've done anything.
+let firebaseRestorePromise = new Promise((resolve) => {
+  const unsub = onAuthStateChanged(auth, (user) => {
+    unsub();
+    resolve(user);
+  });
+});
 
 const sessionKit = new SessionKit({
   appName: 'Pesolar Mine',
@@ -34,6 +47,19 @@ export async function restoreSession() {
   const session = await sessionKit.restore();
   if (session) {
     activeSession = session;
+    const account = String(session.actor);
+
+    // Skip the greymassnoop::noop signing prompt entirely if Firebase
+    // already has a live session for this exact WAX account - that's the
+    // whole point of Firebase Auth persisting login across reloads. We
+    // only need a fresh signature when there's no session yet (first
+    // login ever, cleared browser storage, explicit logout, or switching
+    // to a different WAX account than the one Firebase has on file).
+    const existingUser = await firebaseRestorePromise;
+    if (existingUser && existingUser.uid === account) {
+      return session;
+    }
+
     await proveIdentityToFirebase(session);
   }
   return session;

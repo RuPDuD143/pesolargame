@@ -27,8 +27,15 @@ export const CONFIG = {
   WAX_TOKEN_CONTRACT: 'eosio.token',
   REGISTER_COST_WAX: '100.00000000 WAX',
   PESOLAR_TOKEN_CONTRACT: 'pesolargame1',
-  REGISTER_COST_PESOLAR: '10000.0000 PESOLAR',
-  REGISTER_MEMO: 'register',
+  // PESOLAR is a 6-decimal token on-chain (symbol "PESOLAR,6") - the
+  // contract asserts on the exact string "10000.000000 PESOLAR". This used
+  // to be '10000.0000 PESOLAR' (4 decimals), which the contract rejects.
+  REGISTER_COST_PESOLAR: '10000.000000 PESOLAR',
+  // The contract's on_notify handler checks the memo verbatim per token,
+  // not a single generic string - see the "register::wax" / "register::pesolar"
+  // asserts baked into pesolar.wasm.
+  REGISTER_MEMO_WAX: 'register::wax',
+  REGISTER_MEMO_PESOLAR: 'register::pesolar',
   // TODO: the URL Render gives you after deploying the server/ folder
   // there, e.g. 'https://pesolar-backend.onrender.com' (no trailing slash)
   API_BASE_URL: 'https://pesolargame.onrender.com'
