@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pesolar Mine - Mining Demo</title>
+  <style>
+    body { margin: 0; background: #14100c; color: #eee; font-family: system-ui, sans-serif; }
+    #hud { position: fixed; top: 10px; left: 10px; z-index: 5; }
+    #hud input { width: 90px; }
+    canvas { display: block; margin: 0 auto; background: #2b2118; }
+    #toast { position: fixed; top: 10px; right: 10px; z-index: 5; }
+    #toast div { background: #333; padding: 6px 10px; margin-bottom: 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    Account: <input id="account" value="player1" />
+    Location:
+    <select id="location">
+      <option value="0">Crag Hollow</option>
+      <option value="1">Rustrock Cavern</option>
+      <option value="2">Aurum Depths</option>
+      <option value="3">Shardfall Abyss</option>
+      <option value="4">The Noble Chasm</option>
+      <option value="5">Amaurosis</option>
+    </select>
+    <button id="join">Join</button>
+    <p>WASD to move, click near your character to strike a node.</p>
+    <p><em>Note: this demo page skips wallet login for quick testing - it calls
+    throwPickaxe with whatever account name you type. Cloud Functions will
+    reject it with unauthenticated unless you've also signed in via
+    index.html first (Firebase Auth session is shared across pages on the
+    same origin).</em></p>
+  </div>
+  <div id="toast"></div>
+  <canvas id="canvas" width="800" height="800"></canvas>
+
+  <script type="module" src="js/mining.js"></script>
+</body>
+</html>
