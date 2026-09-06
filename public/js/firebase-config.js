@@ -7,12 +7,12 @@ import { getAuth, signInWithCustomToken } from 'https://www.gstatic.com/firebase
 import { getFirestore } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 
 const firebaseConfig = {
-  apiKey: 'TODO',
-  authDomain: 'TODO.firebaseapp.com',
-  projectId: 'TODO',
-  storageBucket: 'TODO.appspot.com',
-  messagingSenderId: 'TODO',
-  appId: 'TODO'
+  apiKey: "AIzaSyDrJSgCNjAx7eE263tQDwpi5rkYXl-L_Os",
+  authDomain: "pesolargame.firebaseapp.com",
+  projectId: "pesolargame",
+  storageBucket: "pesolargame.firebasestorage.app",
+  messagingSenderId: "835487257937",
+  appId: "1:835487257937:web:b1fcf57ff9753afa46af70"
 };
 
 export const app = initializeApp(firebaseConfig);
