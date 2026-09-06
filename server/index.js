@@ -246,10 +246,20 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
     await db.runTransaction(async (tx) => {
       const sysdataRef = db.collection('sysdata').doc('main');
       const sysSnap = await tx.get(sysdataRef);
-      tx.update(sysdataRef, {
-        minedResources: (sysSnap.data().minedResources || 0) + result.value,
+      // sysSnap.data() is undefined if the doc doesn't exist (e.g. after a
+      // Firestore wipe that hasn't been fully repaired yet) - calling
+      // .minedResources on that throws, which aborts this whole
+      // transaction *before* the inventory write below ever runs. That's
+      // exactly "no minedResources, no inventory doc" with no visible
+      // error client-side (throwPickaxe just 500s and the client only
+      // console.errors it). tx.set(..., {merge:true}) instead of
+      // tx.update() also means this recreates the doc if it's missing,
+      // rather than requiring it to already exist.
+      const currentMined = sysSnap.exists ? (sysSnap.data().minedResources || 0) : 0;
+      tx.set(sysdataRef, {
+        minedResources: currentMined + result.value,
         lastUpdated: FieldValue.serverTimestamp()
-      });
+      }, { merge: true });
 
       const invRef = db.collection('workers').doc(account).collection('inventory').doc(result.oreType);
       const invSnap = await tx.get(invRef);
