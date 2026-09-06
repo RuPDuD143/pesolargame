@@ -22,8 +22,7 @@ const { computeEnergyStatus } = require('./lib/energy');
 const { requestLoginNonce, verifyLogin } = require('./lib/verify-signature');
 const nodeManager = require('./lib/node-manager');
 const { ORE_ASSET_IDS } = require('./lib/ore-asset-ids');
-const { LOCATIONS, LOCATION_MIN_ENERGY_MAX } = require('./lib/ore-config');
-const { startRespawnSweep } = require('./lib/respawn-sweep');
+const { LOCATIONS, LOCATION_MIN_ENERGY_MAX, RESPAWN_DELAY_MS } = require('./lib/ore-config');
 
 // ---------------------------------------------------------------------
 // Firebase Admin init - reads the FULL service account JSON from an env
@@ -272,9 +271,11 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
       });
     });
 
-    // No Cloud Tasks call needed here: strikeNodeTx already stamped
-    // respawnAtMs on the node doc, and the always-on respawn sweep
-    // (started below) picks it up within about a second.
+    // No Cloud Tasks, no polling: the node already got its respawnAtMs
+    // stamped inside strikeNodeTx's transaction, and this books a single
+    // in-memory timer that fires exactly once, RESPAWN_DELAY_MS from now -
+    // see node-manager.js for why that's cheaper than a recurring sweep.
+    nodeManager.scheduleRespawn(db, locationId, nodeId, RESPAWN_DELAY_MS);
 
     res.json({ struck: true, depleted: true, oreType: result.oreType, value: result.value });
   } catch (err) {
@@ -288,6 +289,36 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
 // you ever add a new location) to populate mining nodes. Safe to visit
 // more than once - it's a no-op once nodes already exist.
 // ---------------------------------------------------------------------
+
+// Manual safety net only - NOT called on a timer. Respawns are normally
+// handled by a one-shot timer booked the instant a node depletes (see
+// scheduleRespawn in throwPickaxe above) plus a startup catch-up pass (see
+// catchUpPendingRespawns below), so this should rarely find anything. It
+// exists for the edge case where a node's timer was somehow lost without a
+// restart happening (e.g. the process got killed hard enough to skip the
+// catch-up pass) - visit this URL by hand if a node ever looks stuck
+// depleted with no sign of respawning.
+app.get('/sweepRespawns', async (req, res) => {
+  try {
+    const now = Date.now();
+    let rescheduled = 0;
+    for (const locationId of Object.keys(LOCATIONS)) {
+      const snap = await nodeManager
+        .nodesCollection(db, locationId)
+        .where('state', '==', 'depleted')
+        .where('respawnAtMs', '<=', now)
+        .get();
+      snap.docs.forEach((doc) => {
+        nodeManager.scheduleRespawn(db, locationId, doc.id, 0);
+        rescheduled++;
+      });
+    }
+    res.status(200).send(`ok - ${rescheduled} overdue node(s) rescheduled`);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('error');
+  }
+});
 
 app.get('/seedLocations', async (req, res) => {
   try {
@@ -307,9 +338,12 @@ app.get('/seedLocations', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Pesolar backend is running.'));
 
-// Always-on respawn sweep - replaces Cloud Tasks entirely (see
-// lib/respawn-sweep.js for why this is fine on a persistent server).
-startRespawnSweep(db);
+// One-time catch-up on boot only - NOT a recurring poll. Rebuilds
+// in-memory respawn timers for any node that was already depleted when
+// this process started (e.g. after a redeploy or crash), since
+// scheduleRespawn's timers don't survive a restart. See
+// catchUpPendingRespawns in lib/node-manager.js.
+nodeManager.catchUpPendingRespawns(db);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Pesolar backend listening on port ${PORT}`));

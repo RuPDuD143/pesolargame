@@ -36,7 +36,7 @@ function randomSpawnPoints(minCount = 25, maxCount = 50, roomSize = 2000, margin
   return points;
 }
 
-const RESPAWN_DELAY_MS = 5000;
+const RESPAWN_DELAY_MS = 60 * 1000; // 1 minute after a node is mined out
 
 // Per GAME_SPEC.md: location 0 is free for everyone; 1-5 require the
 // worker's on-chain energy_max tier to be at least this much. Mirrored
