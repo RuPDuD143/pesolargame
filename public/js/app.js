@@ -2,12 +2,18 @@
 // Firebase callables. Logic (render functions, stopwatch, eyelid
 // transition) is otherwise unchanged from the SQL slice.
 
-import { CONFIG, apiFetch } from './firebase-config.js';
-import * as Wallet from './wallet.js';
+import { CONFIG, apiFetch } from './firebase-config.js?v=5';
+import * as Wallet from './wallet.js?v=5';
+import { mountMine, LOCATION_NAMES } from './mining.js?v=5';
 
 const screen = document.getElementById('screen');
+let activeMine = null; // torn down whenever we re-render away from the world
 
 function render(html) {
+  if (activeMine) {
+    activeMine.destroy();
+    activeMine = null;
+  }
   screen.innerHTML = html;
 }
 
@@ -41,16 +47,16 @@ function renderRegisterChoice(account) {
     </div>
   `);
   document.getElementById('btn-register-wax').onclick = () =>
-    register(account, CONFIG.WAX_TOKEN_CONTRACT, CONFIG.REGISTER_COST_WAX);
+    register(account, CONFIG.WAX_TOKEN_CONTRACT, CONFIG.REGISTER_COST_WAX, CONFIG.REGISTER_MEMO_WAX);
   document.getElementById('btn-register-pesolar').onclick = () =>
-    register(account, CONFIG.PESOLAR_TOKEN_CONTRACT, CONFIG.REGISTER_COST_PESOLAR);
+    register(account, CONFIG.PESOLAR_TOKEN_CONTRACT, CONFIG.REGISTER_COST_PESOLAR, CONFIG.REGISTER_MEMO_PESOLAR);
   document.getElementById('btn-spectate').onclick = () => enterWorld(account, { spectator: true });
 }
 
-async function register(account, tokenContract, quantity) {
+async function register(account, tokenContract, quantity, memo) {
   render(`<div class="panel"><p>Confirm the transaction in your wallet...</p></div>`);
   try {
-    await Wallet.sendRegistrationTransfer({ tokenContract, quantity, memo: CONFIG.REGISTER_MEMO });
+    await Wallet.sendRegistrationTransfer({ tokenContract, quantity, memo });
     render(`<div class="panel"><p>Registered! Setting up your worker...</p></div>`);
     setTimeout(() => checkWorker(account), 2000);
   } catch (err) {
@@ -89,18 +95,36 @@ function renderResting(account, status) {
 }
 
 function enterWorld(account, { spectator, energy }) {
+  const locationOptions = LOCATION_NAMES
+    .map((name, id) => `<option value="${id}">${name}</option>`)
+    .join('');
+
   render(`
     <div class="eyelid eyelid-top"></div>
     <div class="eyelid eyelid-bottom"></div>
-    <div class="world-stub panel">
-      <h1>${account}${spectator ? ' [GUEST]' : ''}</h1>
-      <p>${spectator ? 'You are spectating - no pickaxe.' : `Energy: ${energy}`}</p>
-      <p><em>Game world / house scene loads here.</em></p>
+    <div class="world panel">
+      <div class="world-hud">
+        <h1>${account}${spectator ? ' [GUEST]' : ''}</h1>
+        <p>${spectator ? 'You are spectating - no pickaxe.' : `Energy: ${energy}`}</p>
+        <label>Cave:
+          <select id="world-location">${locationOptions}</select>
+        </label>
+      </div>
+      <div id="world-toast" class="world-toast"></div>
+      <canvas id="world-canvas" width="800" height="800"></canvas>
     </div>
   `);
   void document.querySelector('.eyelid-top').offsetHeight;
   document.querySelector('.eyelid-top').classList.add('open');
   document.querySelector('.eyelid-bottom').classList.add('open');
+
+  const canvas = document.getElementById('world-canvas');
+  const toastEl = document.getElementById('world-toast');
+  activeMine = mountMine({ canvas, toastEl, account, locationId: 0, spectator });
+
+  document.getElementById('world-location').onchange = (e) => {
+    activeMine.setLocation(Number(e.target.value));
+  };
 }
 
 async function checkWorker(account) {

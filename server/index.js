@@ -47,6 +47,11 @@ initializeApp({
 const db = getFirestore();
 const auth = getAuth();
 
+// [TEMPORARY] DEMO MODE - see the matching block in server/lib/node-manager.js.
+if (process.env.DEMO_MODE === 'true') {
+  console.warn('[DEMO MODE] resources pinned to 1,000,000 for node spawning - set DEMO_MODE=false (or unset it) to restore the real economy.');
+}
+
 const app = express();
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
 app.use(express.json());

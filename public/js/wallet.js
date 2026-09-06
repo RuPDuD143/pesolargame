@@ -13,13 +13,35 @@
 // itself guarantees wasn't forged. This is untested against a live wallet
 // from here - test the actual signing prompt end-to-end before shipping.
 
-import { SessionKit } from 'https://esm.sh/@wharfkit/session@1?bundle';
-import { WalletPluginAnchor } from 'https://esm.sh/@wharfkit/wallet-plugin-anchor@1?bundle';
-import { WalletPluginCloudWallet } from 'https://esm.sh/@wharfkit/wallet-plugin-cloudwallet@1?bundle';
-import { WalletPluginWombat } from 'https://esm.sh/@wharfkit/wallet-plugin-wombat@1?bundle';
-import { WebRenderer } from 'https://esm.sh/@wharfkit/web-renderer@1?bundle';
+// No `?bundle` here on purpose: that param makes esm.sh inline each
+// package's own private copy of its dependencies instead of letting them
+// share one. All five of these packages depend on @wharfkit/antelope, so
+// with ?bundle each one got its own separate copy - same class, different
+// module instance - which is exactly what triggers wharfkit's own "alien
+// instance of bytes/logo... more than one version of @wharfkit/antelope"
+// runtime check (instanceof fails across the duplicate copies). Dropping
+// ?bundle lets esm.sh resolve @wharfkit/antelope to one shared module for
+// the whole page, so instanceof checks between these packages agree again.
+import { SessionKit } from 'https://esm.sh/@wharfkit/session@1';
+import { WalletPluginAnchor } from 'https://esm.sh/@wharfkit/wallet-plugin-anchor@1';
+import { WalletPluginCloudWallet } from 'https://esm.sh/@wharfkit/wallet-plugin-cloudwallet@1';
+import { WalletPluginWombat } from 'https://esm.sh/@wharfkit/wallet-plugin-wombat@1';
+import { WebRenderer } from 'https://esm.sh/@wharfkit/web-renderer@1';
 
-import { CONFIG, auth, apiFetch, signInWithCustomToken } from './firebase-config.js';
+import { CONFIG, auth, apiFetch, signInWithCustomToken } from './firebase-config.js?v=5';
+import { onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js';
+
+// Firebase Auth persists its own session (IndexedDB, default persistence)
+// and silently refreshes ID tokens on its own - it doesn't need us to
+// mint a new custom token on every page load. onAuthStateChanged() fires
+// once, synchronously-ish, with whatever session Firebase already
+// restored from disk, before we've done anything.
+let firebaseRestorePromise = new Promise((resolve) => {
+  const unsub = onAuthStateChanged(auth, (user) => {
+    unsub();
+    resolve(user);
+  });
+});
 
 const sessionKit = new SessionKit({
   appName: 'Pesolar Mine',
@@ -34,6 +56,19 @@ export async function restoreSession() {
   const session = await sessionKit.restore();
   if (session) {
     activeSession = session;
+    const account = String(session.actor);
+
+    // Skip the greymassnoop::noop signing prompt entirely if Firebase
+    // already has a live session for this exact WAX account - that's the
+    // whole point of Firebase Auth persisting login across reloads. We
+    // only need a fresh signature when there's no session yet (first
+    // login ever, cleared browser storage, explicit logout, or switching
+    // to a different WAX account than the one Firebase has on file).
+    const existingUser = await firebaseRestorePromise;
+    if (existingUser && existingUser.uid === account) {
+      return session;
+    }
+
     await proveIdentityToFirebase(session);
   }
   return session;
