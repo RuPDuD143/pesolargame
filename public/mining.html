@@ -35,19 +35,6 @@
   <div id="toast"></div>
   <canvas id="canvas" width="800" height="800"></canvas>
 
-  <script type="module">
-    import { mountMine } from './js/mining.js?v=4';
-
-    const canvas = document.getElementById('canvas');
-    const toastEl = document.getElementById('toast');
-    let mine = null;
-
-    document.getElementById('join').onclick = () => {
-      const account = document.getElementById('account').value.trim() || 'player1';
-      const locationId = Number(document.getElementById('location').value);
-      if (mine) mine.destroy();
-      mine = mountMine({ canvas, toastEl, account, locationId, spectator: false });
-    };
-  </script>
+  <script type="module" src="js/mining.js"></script>
 </body>
 </html>

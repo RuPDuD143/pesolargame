@@ -17,23 +17,9 @@ function nodesCollection(db, locationId) {
   return db.collection('locations').doc(String(locationId)).collection('nodes');
 }
 
-// [TEMPORARY] DEMO MODE ---------------------------------------------
-// Set DEMO_MODE=true in the environment (e.g. Render's dashboard) to
-// pretend the world has 1,000,000 in-game resources, regardless of what
-// sysdata/main.resources actually says in Firestore. This only affects
-// the nodeMax calculation below (i.e. which ore tiers are allowed to
-// spawn) - it never writes anything to Firestore, so turning DEMO_MODE
-// back off restores the real economy exactly as it was. Remove this
-// block (and the env var) once you no longer need to demo high-tier ore
-// spawning on demand.
-const DEMO_MODE = process.env.DEMO_MODE === 'true';
-const DEMO_RESOURCES = 1000000;
-// ---------------------------------------------------------------------
-
 /** floor((resources - mined_resources) / 100), per spec. */
 function computeNodeMax(sysdata) {
-  const resources = DEMO_MODE ? DEMO_RESOURCES : sysdata.resources;
-  return Math.floor((resources - sysdata.minedResources) / 100);
+  return Math.floor((sysdata.resources - sysdata.minedResources) / 100);
 }
 
 /** Weighted-random tier pick, then downgrade-to-baseline (or no spawn) if too expensive. */
