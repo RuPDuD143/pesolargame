@@ -29,6 +29,7 @@ const CANVAS_SIZE = 800;
 const SCALE = CANVAS_SIZE / ROOM_SIZE;
 const HIT_RADIUS = 50;
 const THROW_LEG_MS = 150;
+const MAX_THROW_DISTANCE = 200; // px - must match server/index.js's MAX_THROW_DISTANCE
 
 const ORE_COLORS = {
   stone: '#8a8a8a', iron: '#a5673f', gold: '#e8c547',
@@ -62,7 +63,11 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   let unsubThrows = null;
   let rafId = null;
   let destroyed = false;
-  const sessionStartedAt = Timestamp.now();
+  // Reset per connect() (see below), not just once at mount - otherwise
+  // switching locations and switching back replays that location's whole
+  // recent throw history in one burst, since a fresh onSnapshot() always
+  // reports its initial docs as 'added'.
+  let sessionStartedAt = Timestamp.now();
 
   function toast(msg) {
     const div = document.createElement('div');
@@ -79,6 +84,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     currentLocationId = id;
     nodes = new Map();
     throws = [];
+    sessionStartedAt = Timestamp.now(); // fresh cutoff for *this* join, see note above
 
     if (unsubNodes) unsubNodes();
     if (unsubThrows) unsubThrows();
@@ -108,6 +114,12 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         if (change.type !== 'added') return;
         const t = change.doc.data();
         if (!t.createdAt || t.createdAt.toMillis() < sessionStartedAt.toMillis()) return;
+        // Our own throws are already animated optimistically in
+        // onCanvasClick below - pushing them again here (using the
+        // server's clamped/corrected coordinates) is what caused the
+        // "throws far, snaps back, then throws again at the right
+        // length" double-animation.
+        if (t.account === account) return;
         throws.push({ thrower: t.account, fromX: t.fromX, fromY: t.fromY, toX: t.toX, toY: t.toY, start: performance.now() });
       });
     });
@@ -147,9 +159,20 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     const targetX = target ? target.x : clickX;
     const targetY = target ? target.y : clickY;
 
+    // Clamp the same way the server does before animating - otherwise a
+    // far-off click animates a full-length throw locally, then a second,
+    // shorter "corrected" one once the server's clamped result comes back.
+    const dx = targetX - player.x;
+    const dy = targetY - player.y;
+    const dist = Math.hypot(dx, dy);
+    const clampedDist = Math.min(dist, MAX_THROW_DISTANCE);
+    const angle = Math.atan2(dy, dx);
+    const finalX = player.x + Math.cos(angle) * clampedDist;
+    const finalY = player.y + Math.sin(angle) * clampedDist;
+
     // Optimistic local animation - server broadcast (via the throws
     // listener) will also show this to other players.
-    throws.push({ thrower: account, fromX: player.x, fromY: player.y, toX: targetX, toY: targetY, start: performance.now() });
+    throws.push({ thrower: account, fromX: player.x, fromY: player.y, toX: finalX, toY: finalY, start: performance.now() });
 
     try {
       const result = await apiFetch('/throwPickaxe', {
