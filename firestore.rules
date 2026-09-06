@@ -1,0 +1,51 @@
+rules_version = '2';
+
+// Security model:
+// - Clients read directly from Firestore (for real-time listeners).
+// - Clients NEVER write directly. Every write goes through a Cloud
+//   Function, which runs with the Admin SDK (bypasses these rules) and
+//   only after verifying request.auth.uid matches a WAX account that
+//   proved key ownership via the signature-verification flow in
+//   functions/lib/verify-signature.js.
+//
+// request.auth.uid, when set, is a WAX account name - it is only ever
+// set by admin.auth().createCustomToken(accountName) after signature
+// verification succeeds (see functions/index.js: verifyLogin).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /workers/{account} {
+      allow read: if true;
+      allow write: if false; // functions only
+    }
+
+    match /sysdata/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /locations/{locationId}/nodes/{nodeId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /locations/{locationId}/throws/{throwId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Short-lived nonces used for the WAX login proof. Not client-readable
+    // (the client already knows its own nonce from the callable response)
+    // and never client-writable.
+    match /authNonces/{account} {
+      allow read: if false;
+      allow write: if false;
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
