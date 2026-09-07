@@ -122,3 +122,110 @@ html, body {
   max-width: 90vmin;
   max-height: 70vh;
 }
+
+/* --- Inventory button + panel ---
+   Fixed to the viewport (not the canvas) so it's always reachable in the
+   bottom-left corner regardless of how big the canvas is scaled. */
+
+.inventory-toggle {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  z-index: 7;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 2px solid #d4af37;
+  background: #2b2118;
+  color: #eee;
+  font-size: 1.6rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.inventory-toggle:hover {
+  background: #3a2c1e;
+}
+
+.inventory-panel {
+  position: fixed;
+  bottom: 84px;
+  left: 16px;
+  z-index: 7;
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 140px));
+  background: #1c1712;
+  border: 2px solid #d4af37;
+  border-radius: 10px;
+  padding: 12px;
+  overflow-y: auto;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+}
+
+.inventory-panel.hidden {
+  display: none;
+}
+
+.inventory-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.inventory-panel-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.inventory-close {
+  background: none;
+  border: none;
+  color: #eee;
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+
+.inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 10px;
+}
+
+.inventory-empty {
+  grid-column: 1 / -1;
+  color: #999;
+  font-size: 0.9rem;
+}
+
+.inventory-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #2b2118;
+  border-radius: 8px;
+  padding: 8px 4px;
+}
+
+.inventory-swatch {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid #000;
+  margin-bottom: 4px;
+}
+
+.inventory-item-name {
+  font-size: 0.75rem;
+  text-transform: capitalize;
+  text-align: center;
+}
+
+.inventory-item-amount {
+  font-size: 0.8rem;
+  color: #d4af37;
+}

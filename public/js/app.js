@@ -5,14 +5,20 @@
 import { CONFIG, apiFetch } from './firebase-config.js?v=5';
 import * as Wallet from './wallet.js?v=5';
 import { mountMine, LOCATION_NAMES } from './mining.js?v=5';
+import { mountInventory } from './inventory.js?v=5';
 
 const screen = document.getElementById('screen');
 let activeMine = null; // torn down whenever we re-render away from the world
+let activeInventory = null; // same - only exists while in the world
 
 function render(html) {
   if (activeMine) {
     activeMine.destroy();
     activeMine = null;
+  }
+  if (activeInventory) {
+    activeInventory.destroy();
+    activeInventory = null;
   }
   screen.innerHTML = html;
 }
@@ -121,6 +127,13 @@ function enterWorld(account, { spectator, energy }) {
   const canvas = document.getElementById('world-canvas');
   const toastEl = document.getElementById('world-toast');
   activeMine = mountMine({ canvas, toastEl, account, locationId: 0, spectator });
+
+  // Spectators aren't registered workers, so there's no workers/{account}
+  // doc (and no inventory subcollection) to read - only show the button
+  // for people who can actually have ore.
+  if (!spectator) {
+    activeInventory = mountInventory({ container: document.querySelector('.world'), account });
+  }
 
   document.getElementById('world-location').onchange = (e) => {
     activeMine.setLocation(Number(e.target.value));

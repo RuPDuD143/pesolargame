@@ -15,6 +15,10 @@
 //   and throws update live.
 // - destroy()/setLocation() so callers can tear down or switch caves
 //   without leaking listeners or stacking requestAnimationFrame loops.
+// - zoomed-in camera that eases toward the character instead of showing
+//   the whole 2000x2000 room flat on the canvas at all times (see ZOOM /
+//   camera below). Node progress is now a "3/375"-style readout instead
+//   of just a bar, since a bar alone made high-tier nodes look stuck.
 //
 // Movement/anti-cheat caveat from before still applies: charX/charY are
 // still client-reported, not server-tracked - unchanged in this slice.
@@ -26,12 +30,17 @@ import {
 
 const ROOM_SIZE = 2000;
 const CANVAS_SIZE = 800;
-const SCALE = CANVAS_SIZE / ROOM_SIZE;
-const HIT_RADIUS = 50;
+const BASE_SCALE = CANVAS_SIZE / ROOM_SIZE; // 0.4 - old "whole room fits on screen" scale
+const ZOOM = 5; // enlarges the whole view so the character reads as ~100x100px
+const SCALE = BASE_SCALE * ZOOM; // world units -> canvas pixels, zoomed in
+const PLAYER_RADIUS = 50; // canvas px - 100px diameter, per the 100x100 ask
+const NODE_RADIUS = 70; // canvas px - kept at the old node:player size ratio (14:10)
+const CAMERA_FOLLOW = 0.08; // 0-1 per frame - how quickly the camera eases toward the character (lower = laggier/smoother)
+const HIT_RADIUS = 50; // world units - click-proximity radius, unrelated to pixel sizes above
 const THROW_LEG_MS = 150;
-const MAX_THROW_DISTANCE = 200; // px - must match server/index.js's MAX_THROW_DISTANCE
+const MAX_THROW_DISTANCE = 200; // world units - must match server/index.js's MAX_THROW_DISTANCE
 
-const ORE_COLORS = {
+export const ORE_COLORS = {
   stone: '#8a8a8a', iron: '#a5673f', gold: '#e8c547',
   diamond: '#7fe8e0', platinum: '#d8dee9', pesolarium: '#c561e8'
 };
@@ -57,6 +66,10 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   let currentLocationId = locationId;
   let nodes = new Map(); // nodeId -> node
   const player = { x: 1000, y: 1000 };
+  // Camera is in world coordinates and marks what's drawn at canvas-center.
+  // Spectators have no character to follow, so it just sits at room-center;
+  // players start it already on them so it doesn't slide in from the origin.
+  const camera = { x: spectator ? ROOM_SIZE / 2 : player.x, y: spectator ? ROOM_SIZE / 2 : player.y };
   const keys = {};
   let throws = [];
   let unsubNodes = null;
@@ -76,8 +89,23 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     setTimeout(() => div.remove(), 2500);
   }
 
+  // World -> canvas, relative to wherever the camera currently is (see
+  // updateCamera below) rather than a fixed room->canvas mapping - that's
+  // what makes the view pan as the camera follows the character.
   function toCanvas(x, y) {
-    return [x * SCALE, y * SCALE];
+    return [
+      (x - camera.x) * SCALE + CANVAS_SIZE / 2,
+      (y - camera.y) * SCALE + CANVAS_SIZE / 2
+    ];
+  }
+
+  // Inverse of toCanvas - eases the camera toward the character each frame
+  // instead of snapping to it, so movement feels like a "follow" rather
+  // than the view being rigidly locked to the player.
+  function updateCamera() {
+    if (spectator) return; // nothing to follow
+    camera.x += (player.x - camera.x) * CAMERA_FOLLOW;
+    camera.y += (player.y - camera.y) * CAMERA_FOLLOW;
   }
 
   function connect(id) {
@@ -155,8 +183,12 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     // fixes both.
     const displayToInternalX = canvas.width / rect.width;
     const displayToInternalY = canvas.height / rect.height;
-    const clickX = ((e.clientX - rect.left) * displayToInternalX) / SCALE;
-    const clickY = ((e.clientY - rect.top) * displayToInternalY) / SCALE;
+    const canvasX = (e.clientX - rect.left) * displayToInternalX;
+    const canvasY = (e.clientY - rect.top) * displayToInternalY;
+    // Inverse of toCanvas() - has to account for the camera offset now
+    // that the view pans, not just the flat world->canvas SCALE.
+    const clickX = camera.x + (canvasX - CANVAS_SIZE / 2) / SCALE;
+    const clickY = camera.y + (canvasY - CANVAS_SIZE / 2) / SCALE;
 
     let target = null;
     let bestDist = HIT_RADIUS;
@@ -203,28 +235,44 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     const [cx, cy] = toCanvas(node.x, node.y);
     const color = ORE_COLORS[node.oreType] || '#fff';
     ctx.beginPath();
-    ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+    ctx.arc(cx, cy, NODE_RADIUS, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
     ctx.strokeStyle = '#000';
+    ctx.lineWidth = 3;
     ctx.stroke();
 
-    const pct = node.strikesRemaining / node.maxStrikes;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(cx - 16, cy - 24, 32, 4);
-    ctx.fillStyle = '#4caf50';
-    ctx.fillRect(cx - 16, cy - 24, 32 * pct, 4);
+    // "3/375"-style progress readout instead of a plain bar - a bar alone
+    // gave no sense of scale, so high-strike ore (diamond etc.) looked
+    // permanently stuck rather than just needing a lot more hits.
+    const label = `${node.strikesRemaining}/${node.maxStrikes}`;
+    ctx.font = `bold ${Math.round(NODE_RADIUS * 0.34)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const labelY = cy - NODE_RADIUS - 16;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.strokeText(label, cx, labelY);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(label, cx, labelY);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
   }
 
   function drawCharacter(x, y, label) {
     const [cx, cy] = toCanvas(x, y);
     ctx.beginPath();
-    ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+    ctx.arc(cx, cy, PLAYER_RADIUS, 0, Math.PI * 2);
     ctx.fillStyle = spectator ? '#999' : '#3aa0ff';
     ctx.fill();
+    ctx.strokeStyle = '#1c1c1c';
+    ctx.lineWidth = 3;
+    ctx.stroke();
     ctx.fillStyle = '#fff';
-    ctx.font = '10px sans-serif';
-    ctx.fillText(label, cx - 10, cy - 14);
+    ctx.textAlign = 'center';
+    ctx.font = `${Math.round(PLAYER_RADIUS * 0.28)}px sans-serif`;
+    ctx.fillText(label, cx, cy - PLAYER_RADIUS - 10);
+    ctx.textAlign = 'left';
   }
 
   function drawThrows(now) {
@@ -256,6 +304,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   function loop() {
     if (destroyed) return;
     if (!spectator) updateMovement();
+    updateCamera();
     ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
     for (const node of nodes.values()) drawNode(node);
     if (!spectator) drawCharacter(player.x, player.y, account || '');

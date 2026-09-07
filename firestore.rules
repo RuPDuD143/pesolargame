@@ -20,6 +20,15 @@ service cloud.firestore {
       allow write: if false; // functions only
     }
 
+    // NOTE: the rule above does NOT cascade to subcollections - Firestore
+    // rules only apply to the exact path matched, so inventory needed its
+    // own explicit rule or the inventory panel's onSnapshot() would fail
+    // with a permission-denied.
+    match /workers/{account}/inventory/{itemId} {
+      allow read: if true;
+      allow write: if false; // functions only
+    }
+
     match /sysdata/{doc} {
       allow read: if true;
       allow write: if false;
