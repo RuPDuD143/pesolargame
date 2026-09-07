@@ -2,9 +2,9 @@
 // Firebase callables. Logic (render functions, stopwatch, eyelid
 // transition) is otherwise unchanged from the SQL slice.
 
-import { CONFIG, apiFetch } from './firebase-config.js?v=6';
-import * as Wallet from './wallet.js?v=6';
-import { mountMine, LOCATION_NAMES } from './mining.js?v=6';
+import { CONFIG, apiFetch } from './firebase-config.js?v=5';
+import * as Wallet from './wallet.js?v=5';
+import { mountMine, LOCATION_NAMES } from './mining.js?v=5';
 
 const screen = document.getElementById('screen');
 let activeMine = null; // torn down whenever we re-render away from the world
@@ -90,11 +90,15 @@ function renderResting(account, status) {
     clearInterval(timer);
     render(`<div class="panel"><p>Waking up...</p></div>`);
     const updated = await apiFetch('/wakeWorker', { method: 'POST', body: { account }, authRequired: true });
-    enterWorld(account, { spectator: false, energy: updated.currentEnergy, energyMax: updated.energyMax });
+    enterWorld(account, { spectator: false, energy: updated.currentEnergy });
   };
 }
 
-function enterWorld(account, { spectator, energy, energyMax = 0 }) {
+function enterWorld(account, { spectator, energy }) {
+  const locationOptions = LOCATION_NAMES
+    .map((name, id) => `<option value="${id}">${name}</option>`)
+    .join('');
+
   render(`
     <div class="eyelid eyelid-top"></div>
     <div class="eyelid eyelid-bottom"></div>
@@ -102,7 +106,9 @@ function enterWorld(account, { spectator, energy, energyMax = 0 }) {
       <div class="world-hud">
         <h1>${account}${spectator ? ' [GUEST]' : ''}</h1>
         <p>${spectator ? 'You are spectating - no pickaxe.' : `Energy: ${energy}`}</p>
-        <p id="world-location-label">${LOCATION_NAMES[0]}</p>
+        <label>Cave:
+          <select id="world-location">${locationOptions}</select>
+        </label>
       </div>
       <div id="world-toast" class="world-toast"></div>
       <canvas id="world-canvas" width="800" height="800"></canvas>
@@ -114,26 +120,11 @@ function enterWorld(account, { spectator, energy, energyMax = 0 }) {
 
   const canvas = document.getElementById('world-canvas');
   const toastEl = document.getElementById('world-toast');
-  const locationLabel = document.getElementById('world-location-label');
-  const eyelidTop = document.querySelector('.eyelid-top');
-  const eyelidBottom = document.querySelector('.eyelid-bottom');
+  activeMine = mountMine({ canvas, toastEl, account, locationId: 0, spectator });
 
-  // Waypoint transitions blink the eyelids shut/open around the actual
-  // location swap instead of a full re-render, matching the fade rule
-  // ("every location change... fade to black, change location... fade
-  // in") without tearing down and remounting the whole mine.
-  function onLocationChange(id, name) {
-    eyelidTop.classList.remove('open');
-    eyelidBottom.classList.remove('open');
-    setTimeout(() => {
-      locationLabel.textContent = name;
-      void eyelidTop.offsetHeight;
-      eyelidTop.classList.add('open');
-      eyelidBottom.classList.add('open');
-    }, 500);
-  }
-
-  activeMine = mountMine({ canvas, toastEl, account, locationId: 0, spectator, energyMax, onLocationChange });
+  document.getElementById('world-location').onchange = (e) => {
+    activeMine.setLocation(Number(e.target.value));
+  };
 }
 
 async function checkWorker(account) {
@@ -142,7 +133,7 @@ async function checkWorker(account) {
 
   if (!status.registered) return renderRegisterChoice(account);
   if (status.isResting) return renderResting(account, status);
-  enterWorld(account, { spectator: false, energy: status.currentEnergy, energyMax: status.energyMax });
+  enterWorld(account, { spectator: false, energy: status.currentEnergy });
 }
 
 async function boot() {

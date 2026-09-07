@@ -12,8 +12,7 @@ const firebaseConfig = {
   projectId: "pesolargame",
   storageBucket: "pesolargame.firebasestorage.app",
   messagingSenderId: "835487257937",
-  appId: "1:835487257937:web:b1fcf57ff9753afa46af70",
-  databaseURL: "https://pesolargame-default-rtdb.firebaseio.com/"
+  appId: "1:835487257937:web:b1fcf57ff9753afa46af70"
 };
 
 // Fails loudly and immediately if this file ever gets deployed with the
@@ -49,7 +48,7 @@ export const CONFIG = {
   REGISTER_MEMO_PESOLAR: 'register::pesolar',
   // TODO: the URL Render gives you after deploying the server/ folder
   // there, e.g. 'https://pesolar-backend.onrender.com' (no trailing slash)
-  API_BASE_URL: 'https://pesolargame.rrlworlds1434.workers.dev'
+  API_BASE_URL: 'https://pesolargame.onrender.com'
 };
 
 /**

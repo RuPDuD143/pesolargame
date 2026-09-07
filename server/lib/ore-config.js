@@ -36,13 +36,7 @@ function randomSpawnPoints(minCount = 25, maxCount = 50, roomSize = 2000, margin
   return points;
 }
 
-const RESPAWN_DELAY_MS = 60 * 1000; // 1 minute after a node is mined out
-
-// Per GAME_SPEC.md: location 0 is free for everyone; 1-5 require the
-// worker's on-chain energy_max tier to be at least this much. Mirrored
-// client-side in public/js/mining.js (LOCATION_MIN_ENERGY_MAX) for
-// drawing locked waypoints - keep both in sync by hand.
-const LOCATION_MIN_ENERGY_MAX = [0, 14, 34, 134, 634, 1334];
+const RESPAWN_DELAY_MS = 5000;
 
 const LOCATIONS = {
   0: {
@@ -108,4 +102,4 @@ const LOCATIONS = {
   }
 };
 
-module.exports = { LOCATIONS, RESPAWN_DELAY_MS, LOCATION_MIN_ENERGY_MAX };
+module.exports = { LOCATIONS, RESPAWN_DELAY_MS };
