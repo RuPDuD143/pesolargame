@@ -23,7 +23,7 @@
 // Movement/anti-cheat caveat from before still applies: charX/charY are
 // still client-reported, not server-tracked - unchanged in this slice.
 
-import { db, apiFetch } from './firebase-config.js?v=5';
+import { db, apiFetch } from './firebase-config.js?v=6';
 import {
   collection, onSnapshot, query, orderBy, limit, Timestamp
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
@@ -44,6 +44,18 @@ export const ORE_COLORS = {
   stone: '#8a8a8a', iron: '#a5673f', gold: '#e8c547',
   diamond: '#7fe8e0', platinum: '#d8dee9', pesolarium: '#c561e8'
 };
+
+// Cave floor texture - one shared Image across every mountMine() instance
+// (switching location doesn't need to refetch it). Drawn as a canvas
+// pattern rather than a CSS background on the <canvas> element itself,
+// so it's anchored to world coordinates and pans correctly with the
+// camera instead of staying fixed to the screen.
+const FLOOR_TILE_WORLD_SIZE = 150; // world units per texture tile - tweak to taste
+const floorImg = new Image();
+let floorImgLoaded = false;
+floorImg.onload = () => { floorImgLoaded = true; };
+floorImg.onerror = () => console.error('mining.js: failed to load img/cave_floor.png');
+floorImg.src = './img/cave_floor.png';
 
 export const LOCATION_NAMES = [
   'Crag Hollow', 'Rustrock Cavern', 'Aurum Depths',
@@ -70,6 +82,8 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   // Spectators have no character to follow, so it just sits at room-center;
   // players start it already on them so it doesn't slide in from the origin.
   const camera = { x: spectator ? ROOM_SIZE / 2 : player.x, y: spectator ? ROOM_SIZE / 2 : player.y };
+  let floorPattern = null; // built lazily once floorImg has actually loaded
+  let wasTouchingWall = false; // edge-detects wall contact so the toast fires once, not every frame
   const keys = {};
   let throws = [];
   let unsubNodes = null;
@@ -231,6 +245,35 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   }
   canvas.addEventListener('click', onCanvasClick);
 
+  function drawFloor() {
+    if (!floorImgLoaded) {
+      ctx.fillStyle = '#2b2118'; // fallback while cave_floor.png is still loading
+      ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      return;
+    }
+    if (!floorPattern) floorPattern = ctx.createPattern(floorImg, 'repeat');
+    // Scales+positions the tile pattern in world space (so it pans with the
+    // camera like the floor is actually part of the cave) rather than
+    // staying glued to the canvas the way a CSS background would.
+    const texToCanvas = (SCALE * FLOOR_TILE_WORLD_SIZE) / floorImg.naturalWidth;
+    floorPattern.setTransform(new DOMMatrix([
+      texToCanvas, 0,
+      0, texToCanvas,
+      CANVAS_SIZE / 2 - camera.x * SCALE,
+      CANVAS_SIZE / 2 - camera.y * SCALE
+    ]));
+    ctx.fillStyle = floorPattern;
+    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+  }
+
+  function drawWalls() {
+    const [x0, y0] = toCanvas(0, 0);
+    const [x1, y1] = toCanvas(ROOM_SIZE, ROOM_SIZE);
+    ctx.strokeStyle = '#5a4630';
+    ctx.lineWidth = 14;
+    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  }
+
   function drawNode(node) {
     const [cx, cy] = toCanvas(node.x, node.y);
     const color = ORE_COLORS[node.oreType] || '#fff';
@@ -259,15 +302,27 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     ctx.textBaseline = 'alphabetic';
   }
 
-  function drawCharacter(x, y, label) {
+  function drawCharacter(x, y, label, touchingWall) {
     const [cx, cy] = toCanvas(x, y);
     ctx.beginPath();
     ctx.arc(cx, cy, PLAYER_RADIUS, 0, Math.PI * 2);
     ctx.fillStyle = spectator ? '#999' : '#3aa0ff';
     ctx.fill();
-    ctx.strokeStyle = '#1c1c1c';
-    ctx.lineWidth = 3;
-    ctx.stroke();
+    // Red glowing outline = "you're pressed against a wall" - there was
+    // previously no feedback at all for this, just a silent position clamp.
+    if (touchingWall) {
+      ctx.save();
+      ctx.shadowColor = '#ff4d4d';
+      ctx.shadowBlur = 20;
+      ctx.strokeStyle = '#ff4d4d';
+      ctx.lineWidth = 5;
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      ctx.strokeStyle = '#1c1c1c';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
     ctx.font = `${Math.round(PLAYER_RADIUS * 0.28)}px sans-serif`;
@@ -305,9 +360,17 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     if (destroyed) return;
     if (!spectator) updateMovement();
     updateCamera();
-    ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+    const touchingWall = !spectator && (
+      player.x <= 0 || player.x >= ROOM_SIZE || player.y <= 0 || player.y >= ROOM_SIZE
+    );
+    if (touchingWall && !wasTouchingWall) toast('You hit the cave wall.');
+    wasTouchingWall = touchingWall;
+
+    drawFloor();
+    drawWalls();
     for (const node of nodes.values()) drawNode(node);
-    if (!spectator) drawCharacter(player.x, player.y, account || '');
+    if (!spectator) drawCharacter(player.x, player.y, account || '', touchingWall);
     drawThrows(performance.now());
     rafId = requestAnimationFrame(loop);
   }

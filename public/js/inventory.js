@@ -1,17 +1,20 @@
 // public/js/inventory.js
 //
-// Bottom-left inventory button + slide-up panel. Reads live from
-// workers/{account}/inventory the same way mining.js reads nodes/throws:
-// straight from the Firestore client SDK (see firestore.rules - clients
-// read directly, all writes go through the server). No new backend
-// endpoint needed for this.
+// Bottom-left inventory button + slide-up slot-grid panel (matches the
+// reference mockup: dark "Inventory  X" header, grey framed grid of
+// square slots below it). Reads live from workers/{account}/inventory
+// the same way mining.js reads nodes/throws: straight from the Firestore
+// client SDK (see firestore.rules - clients read directly, all writes go
+// through the server). No new backend endpoint needed.
 //
 // Mount once per worker session (index.html's enterWorld() does this);
 // call destroy() when leaving the world so the listener doesn't leak.
 
-import { db } from './firebase-config.js?v=5';
+import { db } from './firebase-config.js?v=6';
 import { collection, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
-import { ORE_COLORS } from './mining.js?v=5';
+import { ORE_COLORS } from './mining.js?v=6';
+
+const TOTAL_SLOTS = 35; // 5 columns x 7 rows, matches the reference mockup
 
 /**
  * @param {object} opts
@@ -33,7 +36,9 @@ export function mountInventory({ container, account }) {
         <h2>Inventory</h2>
         <button id="inventory-close" class="inventory-close" aria-label="Close inventory">✕</button>
       </div>
-      <div id="inventory-grid" class="inventory-grid"></div>
+      <div class="inventory-frame">
+        <div id="inventory-grid" class="inventory-grid"></div>
+      </div>
     </div>
   `;
   container.appendChild(root);
@@ -44,19 +49,22 @@ export function mountInventory({ container, account }) {
   const grid = root.querySelector('#inventory-grid');
 
   function renderGrid() {
-    if (items.size === 0) {
-      grid.innerHTML = '<p class="inventory-empty">No ore mined yet - go strike a node!</p>';
-      return;
+    const filled = [...items.values()].sort((a, b) => a.itemName.localeCompare(b.itemName));
+    const slots = [];
+    for (let i = 0; i < TOTAL_SLOTS; i++) {
+      const item = filled[i];
+      if (item) {
+        slots.push(`
+          <div class="inventory-slot filled" title="${item.itemName} ×${item.amount}">
+            <div class="inventory-slot-swatch" style="background:${ORE_COLORS[item.itemName] || '#fff'}"></div>
+            <span class="inventory-slot-amount">×${item.amount}</span>
+          </div>
+        `);
+      } else {
+        slots.push('<div class="inventory-slot"></div>');
+      }
     }
-    grid.innerHTML = [...items.values()]
-      .sort((a, b) => a.itemName.localeCompare(b.itemName))
-      .map((item) => `
-        <div class="inventory-item">
-          <div class="inventory-swatch" style="background:${ORE_COLORS[item.itemName] || '#fff'}"></div>
-          <div class="inventory-item-name">${item.itemName}</div>
-          <div class="inventory-item-amount">×${item.amount}</div>
-        </div>
-      `).join('');
+    grid.innerHTML = slots.join('');
   }
 
   function setOpen(next) {
@@ -66,7 +74,7 @@ export function mountInventory({ container, account }) {
 
   toggleBtn.onclick = () => setOpen(!open);
   closeBtn.onclick = () => setOpen(false);
-  renderGrid(); // show the "empty" state immediately, before the first snapshot arrives
+  renderGrid(); // show the empty grid immediately, before the first snapshot arrives
 
   const invRef = collection(db, 'workers', account, 'inventory');
   const unsub = onSnapshot(
