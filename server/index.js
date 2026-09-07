@@ -230,14 +230,17 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
     // Node depleted on this strike: credit the winner and bump world state.
     await db.runTransaction(async (tx) => {
       const sysdataRef = db.collection('sysdata').doc('main');
-      const sysSnap = await tx.get(sysdataRef);
+      const invRef = db.collection('workers').doc(account).collection('inventory').doc(result.oreType);
+
+      // Firestore transactions require ALL reads before ANY writes -
+      // both gets have to happen first, then both writes below.
+      const [sysSnap, invSnap] = await Promise.all([tx.get(sysdataRef), tx.get(invRef)]);
+
       tx.update(sysdataRef, {
         minedResources: (sysSnap.data().minedResources || 0) + result.value,
         lastUpdated: FieldValue.serverTimestamp()
       });
 
-      const invRef = db.collection('workers').doc(account).collection('inventory').doc(result.oreType);
-      const invSnap = await tx.get(invRef);
       const currentAmount = invSnap.exists ? invSnap.data().amount : 0;
       tx.set(invRef, {
         assetId: ORE_ASSET_IDS[result.oreType],
