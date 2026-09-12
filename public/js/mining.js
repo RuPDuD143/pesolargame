@@ -19,11 +19,16 @@
 //   the whole 2000x2000 room flat on the canvas at all times (see ZOOM /
 //   camera below). Node progress is now a "3/375"-style readout instead
 //   of just a bar, since a bar alone made high-tier nodes look stuck.
+// - real walkways between caves (LOCATION_EXITS below) replace the old
+//   "Cave:" dropdown entirely: each cave is a link in a 0-1-2-3-4-5
+//   chain, and walking through the gap in the east/west wall calls the
+//   same connect() the dropdown used to, via onLocationChange so the UI
+//   can show which cave you're in without polling.
 //
 // Movement/anti-cheat caveat from before still applies: charX/charY are
 // still client-reported, not server-tracked - unchanged in this slice.
 
-import { db, apiFetch } from './firebase-config.js?v=7';
+import { db, apiFetch } from './firebase-config.js?v=8';
 import {
   collection, onSnapshot, query, orderBy, limit, Timestamp
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
@@ -62,22 +67,26 @@ export const LOCATION_NAMES = [
   'Shardfall Abyss', 'The Noble Chasm', 'Amaurosis'
 ];
 
-// A walkway gap in the east wall leading toward another cave. No
-// destination has been decided yet, so it's locked: visible (so it reads
-// as "coming soon" rather than a bug) but not walkable, and touching it
-// gives its own toast instead of the generic wall one. To wire it up
-// later: set `toLocationId` to one of LOCATION_NAMES's indices (0-5) and
-// flip `locked` to false - clampPlayerPosition() and checkExitTravel()
-// already know how to let the player through and hand off to
-// setLocation() once that happens, no other changes needed.
-const EXIT = {
-  side: 'east', // which room edge the gap opens on
-  center: ROOM_SIZE / 2, // position along that edge, in world units
-  width: 220, // opening width, in world units
-  depth: 160, // how far the passage alcove extends past the wall
-  locked: true,
-  toLocationId: null
-};
+// Every cave's walkways, in world units. This is a straight-line chain -
+// cave 0 only has an east exit to cave 1, caves 1-4 have both a west exit
+// (back a step) and an east exit (forward a step), and cave 5 only has a
+// west exit back to cave 4. Replaces the old single locked/dormant EXIT
+// (and the "Cave:" dropdown in app.js) with real, walkable connections.
+const EXIT_WIDTH = 220; // opening width
+const EXIT_DEPTH = 160; // how far the passage alcove extends past the wall
+const EXIT_CENTER = ROOM_SIZE / 2; // every walkway sits centered on its wall
+
+function buildChainExits() {
+  const exits = {};
+  for (let id = 0; id < LOCATION_NAMES.length; id++) {
+    const list = [];
+    if (id > 0) list.push({ side: 'west', toLocationId: id - 1 });
+    if (id < LOCATION_NAMES.length - 1) list.push({ side: 'east', toLocationId: id + 1 });
+    exits[id] = list;
+  }
+  return exits;
+}
+const LOCATION_EXITS = buildChainExits();
 
 /**
  * @param {object} opts
@@ -87,9 +96,12 @@ const EXIT = {
  * @param {number} opts.locationId
  * @param {boolean} [opts.spectator] - if true, no pickaxe is drawn/thrown
  *   for the local player; the cave and everyone else's activity still render.
+ * @param {(id:number)=>void} [opts.onLocationChange] - fired whenever the
+ *   active cave changes (initial mount and every walkway crossing), so the
+ *   caller can show which cave you're in without polling.
  * @returns {{ setLocation(id:number): void, destroy(): void }}
  */
-export function mountMine({ canvas, toastEl, account, locationId, spectator = false }) {
+export function mountMine({ canvas, toastEl, account, locationId, spectator = false, onLocationChange }) {
   const ctx = canvas.getContext('2d');
 
   let currentLocationId = locationId;
@@ -118,6 +130,10 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     div.textContent = msg;
     toastEl.appendChild(div);
     setTimeout(() => div.remove(), 2500);
+  }
+
+  function getExits() {
+    return LOCATION_EXITS[currentLocationId] || [];
   }
 
   // World -> canvas, relative to wherever the camera currently is (see
@@ -182,6 +198,8 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         throws.push({ thrower: t.account, fromX: t.fromX, fromY: t.fromY, toX: t.toX, toY: t.toY, start: performance.now() });
       });
     });
+
+    if (onLocationChange) onLocationChange(id);
   }
 
   function onKeyDown(e) { keys[e.key.toLowerCase()] = true; }
@@ -189,42 +207,67 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
 
-  // The room rect plus, if the exit is unlocked, the little alcove past
-  // the east wall where the walkway leads - lets clampPlayerPosition()
-  // and drawFloor() share one definition of "walkable ground" instead of
-  // drifting out of sync.
-  function exitAlcoveWorldRect() {
-    const half = EXIT.width / 2;
-    if (EXIT.side === 'east') {
-      return { x0: ROOM_SIZE, y0: EXIT.center - half, x1: ROOM_SIZE + EXIT.depth, y1: EXIT.center + half };
+  // The room rect plus, for whichever walls this cave actually has a
+  // walkway on, the little alcove past that wall where the passage leads -
+  // lets clampPlayerPosition()/drawFloor()/drawWalls() all share one
+  // definition of "walkable ground" instead of drifting out of sync.
+  function exitAlcoveWorldRect(exit) {
+    const half = EXIT_WIDTH / 2;
+    if (exit.side === 'east') {
+      return { x0: ROOM_SIZE, y0: EXIT_CENTER - half, x1: ROOM_SIZE + EXIT_DEPTH, y1: EXIT_CENTER + half };
+    }
+    if (exit.side === 'west') {
+      return { x0: -EXIT_DEPTH, y0: EXIT_CENTER - half, x1: 0, y1: EXIT_CENTER + half };
     }
     return null;
   }
 
-  function clampPlayerPosition() {
-    player.y = Math.max(0, Math.min(ROOM_SIZE, player.y));
-    const half = EXIT.width / 2;
-    const inGapY = player.y >= EXIT.center - half && player.y <= EXIT.center + half;
-    const maxX = (!EXIT.locked && EXIT.side === 'east' && inGapY) ? ROOM_SIZE + EXIT.depth : ROOM_SIZE;
-    player.x = Math.max(0, Math.min(maxX, player.x));
+  // How far the player is currently allowed to wander in x - ROOM_SIZE on
+  // each side normally, extended into whichever alcove(s) this cave has a
+  // walkway into, but only while y is actually within the opening.
+  function computeClampLimits() {
+    const half = EXIT_WIDTH / 2;
+    const inGapY = player.y >= EXIT_CENTER - half && player.y <= EXIT_CENTER + half;
+    const westExit = getExits().find((e) => e.side === 'west');
+    const eastExit = getExits().find((e) => e.side === 'east');
+    return {
+      minX: (inGapY && westExit) ? -EXIT_DEPTH : 0,
+      maxX: (inGapY && eastExit) ? ROOM_SIZE + EXIT_DEPTH : ROOM_SIZE
+    };
   }
 
-  // Dormant until EXIT.locked is flipped off and a toLocationId is set -
-  // walking all the way through the alcove then hands off to the same
-  // connect() the cave dropdown already uses.
+  function clampPlayerPosition() {
+    player.y = Math.max(0, Math.min(ROOM_SIZE, player.y));
+    const { minX, maxX } = computeClampLimits();
+    player.x = Math.max(minX, Math.min(maxX, player.x));
+  }
+
+  // Walking all the way through a walkway's alcove hands off to the same
+  // connect() the old dropdown used, then drops the player just inside
+  // the matching wall of the new cave (so you don't land back at the exit
+  // you just used).
+  function travelTo(destinationId, arriveSide) {
+    connect(destinationId);
+    player.x = arriveSide === 'west' ? 40 : ROOM_SIZE - 40;
+    player.y = EXIT_CENTER;
+    camera.x = player.x;
+    camera.y = player.y;
+    toast(`Entered ${LOCATION_NAMES[destinationId]}.`);
+  }
+
   function checkExitTravel() {
-    if (spectator || EXIT.locked || EXIT.toLocationId === null) return;
-    const half = EXIT.width / 2;
-    const inGapY = player.y >= EXIT.center - half && player.y <= EXIT.center + half;
-    if (EXIT.side === 'east' && inGapY && player.x >= ROOM_SIZE + EXIT.depth - 20) {
-      const destinationId = EXIT.toLocationId;
-      connect(destinationId);
-      currentLocationId = destinationId;
-      player.x = 40;
-      player.y = ROOM_SIZE / 2; // arrive just inside the new cave's west wall
-      camera.x = player.x;
-      camera.y = player.y;
-      toast(`Entered ${LOCATION_NAMES[destinationId]}.`);
+    if (spectator) return;
+    const half = EXIT_WIDTH / 2;
+    const inGapY = player.y >= EXIT_CENTER - half && player.y <= EXIT_CENTER + half;
+    if (!inGapY) return;
+
+    const westExit = getExits().find((e) => e.side === 'west');
+    const eastExit = getExits().find((e) => e.side === 'east');
+
+    if (westExit && player.x <= -EXIT_DEPTH + 20) {
+      travelTo(westExit.toLocationId, 'east'); // left via the west wall - appear by the new cave's east wall
+    } else if (eastExit && player.x >= ROOM_SIZE + EXIT_DEPTH - 20) {
+      travelTo(eastExit.toLocationId, 'west'); // left via the east wall - appear by the new cave's west wall
     }
   }
 
@@ -311,13 +354,14 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     const [rx0, ry0] = toCanvas(0, 0);
     const [rx1, ry1] = toCanvas(ROOM_SIZE, ROOM_SIZE);
     ctx.rect(rx0, ry0, rx1 - rx0, ry1 - ry0);
-    const alcove = exitAlcoveWorldRect();
-    if (alcove) {
+    for (const exit of getExits()) {
+      const alcove = exitAlcoveWorldRect(exit);
+      if (!alcove) continue;
       const [ax0, ay0] = toCanvas(alcove.x0, alcove.y0);
       const [ax1, ay1] = toCanvas(alcove.x1, alcove.y1);
       ctx.rect(ax0, ay0, ax1 - ax0, ay1 - ay0);
     }
-    ctx.clip(); // floor pattern below only paints inside the room + alcove now
+    ctx.clip(); // floor pattern below only paints inside the room + alcove(s) now
 
     if (!floorImgLoaded) {
       ctx.fillStyle = '#2b2118'; // fallback while cave_floor.png is still loading
@@ -347,29 +391,50 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     ctx.lineWidth = 16;
     ctx.lineCap = 'square';
 
-    // North, west, south walls are always solid.
+    // North and south are always solid - this chain layout only ever puts
+    // walkways on the east/west walls.
     ctx.beginPath();
     ctx.moveTo(x0, y0); ctx.lineTo(x1, y0);
-    ctx.moveTo(x0, y0); ctx.lineTo(x0, y1);
     ctx.moveTo(x0, y1); ctx.lineTo(x1, y1);
     ctx.stroke();
 
-    // East wall is broken by the exit gap.
-    const gapTopWorld = EXIT.center - EXIT.width / 2;
-    const gapBottomWorld = EXIT.center + EXIT.width / 2;
-    const [, gapTopY] = toCanvas(ROOM_SIZE, gapTopWorld);
-    const [, gapBottomY] = toCanvas(ROOM_SIZE, gapBottomWorld);
-    ctx.beginPath();
-    ctx.moveTo(x1, y0); ctx.lineTo(x1, gapTopY);
-    ctx.moveTo(x1, gapBottomY); ctx.lineTo(x1, y1);
-    ctx.stroke();
-
-    drawExit(x1, gapTopWorld, gapBottomWorld, gapTopY, gapBottomY);
+    const westExit = getExits().find((e) => e.side === 'west');
+    const eastExit = getExits().find((e) => e.side === 'east');
+    drawSideWall('west', x0, y0, y1, westExit);
+    drawSideWall('east', x1, y0, y1, eastExit);
   }
 
-  function drawExit(wallX, gapTopWorld, gapBottomWorld, gapTopY, gapBottomY) {
-    const [farX, farTopY] = toCanvas(ROOM_SIZE + EXIT.depth, gapTopWorld);
-    const [, farBottomY] = toCanvas(ROOM_SIZE + EXIT.depth, gapBottomWorld);
+  function drawSideWall(side, wallX, y0, y1, exit) {
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 16;
+
+    if (!exit) {
+      ctx.beginPath();
+      ctx.moveTo(wallX, y0);
+      ctx.lineTo(wallX, y1);
+      ctx.stroke();
+      return;
+    }
+
+    const half = EXIT_WIDTH / 2;
+    const gapTopWorld = EXIT_CENTER - half;
+    const gapBottomWorld = EXIT_CENTER + half;
+    const worldX = side === 'west' ? 0 : ROOM_SIZE;
+    const [, gapTopY] = toCanvas(worldX, gapTopWorld);
+    const [, gapBottomY] = toCanvas(worldX, gapBottomWorld);
+
+    ctx.beginPath();
+    ctx.moveTo(wallX, y0); ctx.lineTo(wallX, gapTopY);
+    ctx.moveTo(wallX, gapBottomY); ctx.lineTo(wallX, y1);
+    ctx.stroke();
+
+    drawExit(side, wallX, gapTopWorld, gapBottomWorld, gapTopY, gapBottomY, exit);
+  }
+
+  function drawExit(side, wallX, gapTopWorld, gapBottomWorld, gapTopY, gapBottomY, exit) {
+    const farWorldX = side === 'east' ? ROOM_SIZE + EXIT_DEPTH : -EXIT_DEPTH;
+    const [farX, farTopY] = toCanvas(farWorldX, gapTopWorld);
+    const [, farBottomY] = toCanvas(farWorldX, gapBottomWorld);
 
     // Door-frame around the alcove opening, left open on the room side.
     ctx.strokeStyle = '#3a2c1e';
@@ -381,24 +446,11 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     ctx.lineTo(wallX, gapBottomY);
     ctx.stroke();
 
-    if (EXIT.locked) {
-      // Iron bars across the opening - reads as "not open yet", not broken.
-      ctx.strokeStyle = '#666';
-      ctx.lineWidth = 4;
-      const barCount = 4;
-      for (let i = 1; i <= barCount; i++) {
-        const bx = wallX + ((farX - wallX) * i) / (barCount + 1);
-        ctx.beginPath();
-        ctx.moveTo(bx, gapTopY);
-        ctx.lineTo(bx, gapBottomY);
-        ctx.stroke();
-      }
-    }
-
     ctx.font = 'bold 20px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillStyle = EXIT.locked ? '#999' : '#e8c547';
-    ctx.fillText(EXIT.locked ? '🔒 Cave Exit' : 'Cave Exit', (wallX + farX) / 2, gapTopY - 14);
+    ctx.fillStyle = '#e8c547';
+    const arrow = side === 'east' ? '→' : '←';
+    ctx.fillText(`${arrow} ${LOCATION_NAMES[exit.toLocationId]}`, (wallX + farX) / 2, gapTopY - 14);
     ctx.textAlign = 'left';
   }
 
@@ -487,19 +539,15 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   function loop() {
     if (destroyed) return;
     if (!spectator) updateMovement();
+    if (!spectator) checkExitTravel(); // may relocate the player to a new cave
     updateCamera();
 
+    const { minX, maxX } = computeClampLimits();
     const touchingWall = !spectator && (
-      player.x <= 0 || player.x >= ROOM_SIZE || player.y <= 0 || player.y >= ROOM_SIZE
+      player.x <= minX || player.x >= maxX || player.y <= 0 || player.y >= ROOM_SIZE
     );
-    if (touchingWall && !wasTouchingWall) {
-      const half = EXIT.width / 2;
-      const nearExit = EXIT.side === 'east' && player.x >= ROOM_SIZE
-        && player.y >= EXIT.center - half && player.y <= EXIT.center + half;
-      toast(nearExit ? "🔒 This walkway isn't connected to a cave yet." : 'You hit the cave wall.');
-    }
+    if (touchingWall && !wasTouchingWall) toast('You hit the cave wall.');
     wasTouchingWall = touchingWall;
-    if (!spectator) checkExitTravel();
 
     drawFloor();
     drawWalls();

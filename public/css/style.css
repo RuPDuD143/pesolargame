@@ -99,10 +99,6 @@ html, body {
   margin-bottom: 8px;
 }
 
-.world-hud select {
-  margin-left: 6px;
-}
-
 .world-toast {
   position: absolute;
   top: 10px;

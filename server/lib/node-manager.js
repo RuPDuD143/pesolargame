@@ -32,8 +32,19 @@ const DEMO_RESOURCES = 1000000;
 
 /** floor((resources - mined_resources) / 100), per spec. */
 function computeNodeMax(sysdata) {
-  const resources = DEMO_MODE ? DEMO_RESOURCES : sysdata.resources;
-  return Math.floor((resources - sysdata.minedResources) / 100);
+  // Both fields are coerced with a || 0 fallback on purpose: sysdata/main
+  // is created by hand in the Firestore console per the message in
+  // server/index.js ("create it first... with { resources: <int>,
+  // minedResources: 0 }"), so a fresh doc that only has `resources` set
+  // (no minedResources yet) previously produced
+  // `resources - undefined` = NaN. Every comparison against NaN is
+  // false, so the `value > nodeMax` downgrade/reject check below never
+  // triggered - the weighted roll's *unfiltered* tier spawned regardless
+  // of how little `resources` actually was, which is why diamond (and
+  // anything else) could show up even with resources pinned to 5.
+  const resources = DEMO_MODE ? DEMO_RESOURCES : (Number(sysdata.resources) || 0);
+  const minedResources = Number(sysdata.minedResources) || 0;
+  return Math.floor((resources - minedResources) / 100);
 }
 
 /** Weighted-random tier pick, then downgrade-to-baseline (or no spawn) if too expensive. */

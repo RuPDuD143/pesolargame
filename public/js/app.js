@@ -2,10 +2,10 @@
 // Firebase callables. Logic (render functions, stopwatch, eyelid
 // transition) is otherwise unchanged from the SQL slice.
 
-import { CONFIG, apiFetch } from './firebase-config.js?v=7';
-import * as Wallet from './wallet.js?v=7';
-import { mountMine, LOCATION_NAMES } from './mining.js?v=7';
-import { mountInventory } from './inventory.js?v=7';
+import { CONFIG, apiFetch } from './firebase-config.js?v=8';
+import * as Wallet from './wallet.js?v=8';
+import { mountMine, LOCATION_NAMES } from './mining.js?v=8';
+import { mountInventory } from './inventory.js?v=8';
 
 const screen = document.getElementById('screen');
 let activeMine = null; // torn down whenever we re-render away from the world
@@ -101,10 +101,6 @@ function renderResting(account, status) {
 }
 
 function enterWorld(account, { spectator, energy }) {
-  const locationOptions = LOCATION_NAMES
-    .map((name, id) => `<option value="${id}">${name}</option>`)
-    .join('');
-
   render(`
     <div class="eyelid eyelid-top"></div>
     <div class="eyelid eyelid-bottom"></div>
@@ -112,9 +108,7 @@ function enterWorld(account, { spectator, energy }) {
       <div class="world-hud">
         <h1>${account}${spectator ? ' [GUEST]' : ''}</h1>
         <p>${spectator ? 'You are spectating - no pickaxe.' : `Energy: ${energy}`}</p>
-        <label>Cave:
-          <select id="world-location">${locationOptions}</select>
-        </label>
+        <p>Cave: <span id="world-cave-name">${LOCATION_NAMES[0]}</span></p>
       </div>
       <div id="world-toast" class="world-toast"></div>
       <canvas id="world-canvas" width="800" height="800"></canvas>
@@ -126,7 +120,14 @@ function enterWorld(account, { spectator, energy }) {
 
   const canvas = document.getElementById('world-canvas');
   const toastEl = document.getElementById('world-toast');
-  activeMine = mountMine({ canvas, toastEl, account, locationId: 0, spectator });
+  const caveNameEl = document.getElementById('world-cave-name');
+  activeMine = mountMine({
+    canvas, toastEl, account, locationId: 0, spectator,
+    // Walkways (see mining.js's LOCATION_EXITS) replace the old "Cave:"
+    // dropdown - this just keeps the HUD label in sync as you walk
+    // between caves instead of polling for the current location.
+    onLocationChange: (id) => { caveNameEl.textContent = LOCATION_NAMES[id]; }
+  });
 
   // Spectators aren't registered workers, so there's no workers/{account}
   // doc (and no inventory subcollection) to read - only show the button
@@ -134,10 +135,6 @@ function enterWorld(account, { spectator, energy }) {
   if (!spectator) {
     activeInventory = mountInventory({ container: document.querySelector('.world'), account });
   }
-
-  document.getElementById('world-location').onchange = (e) => {
-    activeMine.setLocation(Number(e.target.value));
-  };
 }
 
 async function checkWorker(account) {
