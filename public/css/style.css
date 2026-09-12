@@ -99,6 +99,22 @@ html, body {
   margin-bottom: 8px;
 }
 
+.energy-bar-wrap {
+  width: 220px;
+  height: 14px;
+  margin: 6px auto 4px;
+  background: #2b2118;
+  border: 1px solid #d4af37;
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.energy-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #e8c547, #4caf50);
+  transition: width 0.2s ease-out;
+}
+
 .world-toast {
   position: absolute;
   top: 10px;

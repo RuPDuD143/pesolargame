@@ -2,10 +2,10 @@
 // Firebase callables. Logic (render functions, stopwatch, eyelid
 // transition) is otherwise unchanged from the SQL slice.
 
-import { CONFIG, apiFetch } from './firebase-config.js?v=8';
-import * as Wallet from './wallet.js?v=8';
-import { mountMine, LOCATION_NAMES } from './mining.js?v=8';
-import { mountInventory } from './inventory.js?v=8';
+import { CONFIG, apiFetch } from './firebase-config.js?v=9';
+import * as Wallet from './wallet.js?v=9';
+import { mountMine, LOCATION_NAMES } from './mining.js?v=9';
+import { mountInventory } from './inventory.js?v=9';
 
 const screen = document.getElementById('screen');
 let activeMine = null; // torn down whenever we re-render away from the world
@@ -96,18 +96,25 @@ function renderResting(account, status) {
     clearInterval(timer);
     render(`<div class="panel"><p>Waking up...</p></div>`);
     const updated = await apiFetch('/wakeWorker', { method: 'POST', body: { account }, authRequired: true });
-    enterWorld(account, { spectator: false, energy: updated.currentEnergy });
+    enterWorld(account, { spectator: false, energy: updated.currentEnergy, energyMax: updated.energyMax });
   };
 }
 
-function enterWorld(account, { spectator, energy }) {
+function enterWorld(account, { spectator, energy, energyMax }) {
+  const energyPct = (!spectator && energyMax) ? Math.max(0, Math.min(100, (energy / energyMax) * 100)) : 0;
+
   render(`
     <div class="eyelid eyelid-top"></div>
     <div class="eyelid eyelid-bottom"></div>
     <div class="world panel">
       <div class="world-hud">
         <h1>${account}${spectator ? ' [GUEST]' : ''}</h1>
-        <p>${spectator ? 'You are spectating - no pickaxe.' : `Energy: ${energy}`}</p>
+        ${spectator ? '<p>You are spectating - no pickaxe.</p>' : `
+          <div class="energy-bar-wrap" title="Energy">
+            <div id="energy-bar-fill" class="energy-bar-fill" style="width:${energyPct}%"></div>
+          </div>
+          <p>Energy: <span id="energy-label-val">${energy}</span> / ${energyMax}</p>
+        `}
         <p>Cave: <span id="world-cave-name">${LOCATION_NAMES[0]}</span></p>
       </div>
       <div id="world-toast" class="world-toast"></div>
@@ -126,7 +133,17 @@ function enterWorld(account, { spectator, energy }) {
     // Walkways (see mining.js's LOCATION_EXITS) replace the old "Cave:"
     // dropdown - this just keeps the HUD label in sync as you walk
     // between caves instead of polling for the current location.
-    onLocationChange: (id) => { caveNameEl.textContent = LOCATION_NAMES[id]; }
+    onLocationChange: (id) => { caveNameEl.textContent = LOCATION_NAMES[id]; },
+    // Every landed strike now costs 1 energy server-side - this keeps the
+    // bar/label in sync the moment the server confirms it, no polling.
+    onEnergyChange: (newEnergy) => {
+      const labelEl = document.getElementById('energy-label-val');
+      const fillEl = document.getElementById('energy-bar-fill');
+      if (labelEl) labelEl.textContent = newEnergy;
+      if (fillEl && energyMax) {
+        fillEl.style.width = `${Math.max(0, Math.min(100, (newEnergy / energyMax) * 100))}%`;
+      }
+    }
   });
 
   // Spectators aren't registered workers, so there's no workers/{account}
@@ -143,7 +160,7 @@ async function checkWorker(account) {
 
   if (!status.registered) return renderRegisterChoice(account);
   if (status.isResting) return renderResting(account, status);
-  enterWorld(account, { spectator: false, energy: status.currentEnergy });
+  enterWorld(account, { spectator: false, energy: status.currentEnergy, energyMax: status.energyMax });
 }
 
 async function boot() {

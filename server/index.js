@@ -23,7 +23,7 @@ const { requestLoginNonce, verifyLogin } = require('./lib/verify-signature');
 const nodeManager = require('./lib/node-manager');
 const { ORE_ASSET_IDS } = require('./lib/ore-asset-ids');
 const { LOCATIONS } = require('./lib/ore-config');
-const { startRespawnSweep } = require('./lib/respawn-sweep');
+const { startRespawnSweep, startNodeReconcileSweep } = require('./lib/respawn-sweep');
 
 // ---------------------------------------------------------------------
 // Firebase Admin init - reads the FULL service account JSON from an env
@@ -218,13 +218,28 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
       createdAt: FieldValue.serverTimestamp()
     });
 
-    if (!nodeId) return res.json({ struck: false }); // empty-ground throw, animation only
+    if (!nodeId) return res.json({ struck: false }); // empty-ground throw, animation only - no energy spent
+
+    // Every actual strike attempt costs 1 energy - this was previously
+    // never deducted anywhere, so energy just sat frozen at whatever
+    // getWorkerStatus/wakeWorker last wrote no matter how much mining
+    // happened. Charged only once we know it's landing on a still-active
+    // node (see the `!result` check below) - a miss on an already-mined
+    // node shouldn't cost anything.
+    const workerRef = db.collection('workers').doc(account);
+    const workerSnap = await workerRef.get();
+    if (!workerSnap.exists) return res.status(412).json({ error: 'no_worker_row' });
+    const currentEnergy = workerSnap.data().energy || 0;
+    if (currentEnergy <= 0) return res.status(400).json({ error: 'no_energy' });
 
     const result = await nodeManager.strikeNodeTx(db, locationId, nodeId, account);
-    if (!result) return res.json({ struck: false }); // already depleted by someone else
+    if (!result) return res.json({ struck: false }); // already depleted by someone else - no energy spent on a miss
+
+    const newEnergy = currentEnergy - 1;
+    await workerRef.update({ energy: FieldValue.increment(-1) });
 
     if (!result.depleted) {
-      return res.json({ struck: true, depleted: false, strikesRemaining: result.strikesRemaining });
+      return res.json({ struck: true, depleted: false, strikesRemaining: result.strikesRemaining, energy: newEnergy });
     }
 
     // Node depleted on this strike: credit the winner and bump world state.
@@ -252,9 +267,9 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
 
     // No Cloud Tasks call needed here: strikeNodeTx already stamped
     // respawnAtMs on the node doc, and the always-on respawn sweep
-    // (started below) picks it up within about a second.
+    // (started below) picks it up within about 5 minutes.
 
-    res.json({ struck: true, depleted: true, oreType: result.oreType, value: result.value });
+    res.json({ struck: true, depleted: true, oreType: result.oreType, value: result.value, energy: newEnergy });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'internal_error' });
@@ -262,9 +277,12 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
-// MAINTENANCE: visit this URL once after first deploy (and once more if
-// you ever add a new location) to populate mining nodes. Safe to visit
-// more than once - it's a no-op once nodes already exist.
+// MAINTENANCE: visit this URL any time to (re)populate mining nodes -
+// tops up any location short of NODE_SLOTS_PER_LOCATION nodes, respawns
+// anything depleted and due, and rerolls any active node that's grown
+// too valuable for the mine's current resources budget. Safe to visit as
+// often as you like; the hourly sweep (below) also calls this same
+// function automatically.
 // ---------------------------------------------------------------------
 
 app.get('/seedLocations', async (req, res) => {
@@ -275,8 +293,8 @@ app.get('/seedLocations', async (req, res) => {
         .status(412)
         .send('sysdata/main doc missing - create it first in the Firestore console with { resources: <int>, minedResources: 0 }');
     }
-    await nodeManager.seedAllLocations(db, sysSnap.data());
-    res.status(200).send('ok - mining nodes seeded (or already existed)');
+    await nodeManager.reconcileAllLocations(db, sysSnap.data());
+    res.status(200).send('ok - mining nodes reconciled');
   } catch (err) {
     console.error(err);
     res.status(500).send('error');
@@ -285,9 +303,11 @@ app.get('/seedLocations', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Pesolar backend is running.'));
 
-// Always-on respawn sweep - replaces Cloud Tasks entirely (see
-// lib/respawn-sweep.js for why this is fine on a persistent server).
+// Two always-on sweeps - replaces Cloud Tasks entirely (see
+// lib/respawn-sweep.js for why this is fine on a persistent server, and
+// for why there are two of them instead of one).
 startRespawnSweep(db);
+startNodeReconcileSweep(db);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Pesolar backend listening on port ${PORT}`));

@@ -2,19 +2,20 @@
 //
 // Spawn points used to be a fixed 12-point grid (gridSpawnPoints), which is
 // why nodes always showed up in the same symmetric lattice every location.
-// randomSpawnPoints replaces that: it rolls a random node count in
-// [minCount, maxCount] and scatters that many points around the room,
-// rejecting a candidate that lands too close to one already placed (so
-// nodes don't spawn stacked on top of each other) before falling back to
-// just accepting it after enough failed attempts, so it always terminates.
+// randomSpawnPoints replaces that: it scatters NODE_SLOTS_PER_LOCATION
+// points around the room, rejecting a candidate that lands too close to
+// one already placed (so nodes don't spawn stacked on top of each other)
+// before falling back to just accepting it after enough failed attempts,
+// so it always terminates.
 //
 // This runs once per location at module load (LOCATIONS is built below),
 // same timing as the old gridSpawnPoints() calls - the resulting array is
 // then reused as-is for the server's lifetime, since node-manager.js
 // indexes into config.spawnPoints by position (loc{id}-pt{index}) both when
-// seeding and when respawning a depleted node.
-function randomSpawnPoints(minCount = 25, maxCount = 50, roomSize = 2000, margin = 150, minSpacing = 90) {
-  const count = minCount + Math.floor(Math.random() * (maxCount - minCount + 1));
+// seeding/reconciling and when respawning a depleted node.
+const NODE_SLOTS_PER_LOCATION = 100; // every location targets exactly this many node slots
+
+function randomSpawnPoints(count = NODE_SLOTS_PER_LOCATION, roomSize = 2000, margin = 150, minSpacing = 90) {
   const points = [];
 
   for (let i = 0; i < count; i++) {
@@ -102,4 +103,4 @@ const LOCATIONS = {
   }
 };
 
-module.exports = { LOCATIONS, RESPAWN_DELAY_MS };
+module.exports = { LOCATIONS, RESPAWN_DELAY_MS, NODE_SLOTS_PER_LOCATION };

@@ -4,9 +4,9 @@
 // but state now lives in Firestore so it's shared across Cloud Functions
 // instances and survives cold starts. One doc per spawn point, always
 // present - a "depleted" node just sits with state:'depleted' until a
-// scheduled respawn (see respawn-tasks.js) rolls it fresh again.
+// scheduled respawn (see respawn-sweep.js) rolls it fresh again.
 
-const { LOCATIONS } = require('./ore-config');
+const { LOCATIONS, RESPAWN_DELAY_MS } = require('./ore-config');
 const { ORE_TYPES } = require('./ore-types');
 
 function nodeId(locationId, pointIndex) {
@@ -30,18 +30,21 @@ const DEMO_MODE = process.env.DEMO_MODE === 'true';
 const DEMO_RESOURCES = 1000000;
 // ---------------------------------------------------------------------
 
-/** floor((resources - mined_resources) / 100), per spec. */
+/**
+ * floor((resources - mined_resources) / 100), per spec - how much ore
+ * *value* the whole mine can currently afford spawning, in total.
+ *
+ * Both fields are coerced with a `|| 0` fallback on purpose: sysdata/main
+ * is created by hand in the Firestore console (see server/index.js's
+ * "create it first... with { resources: <int>, minedResources: 0 }"
+ * message), so a doc that only has `resources` set - no `minedResources`
+ * yet - used to compute `resources - undefined` = NaN. Every comparison
+ * against NaN is false, so the `value > nodeMax` downgrade/reject check
+ * in rollOreType() never triggered - the *unfiltered* weighted roll's
+ * tier spawned regardless of how little `resources` actually was, which
+ * is how e.g. diamond could show up with resources pinned to 5.
+ */
 function computeNodeMax(sysdata) {
-  // Both fields are coerced with a || 0 fallback on purpose: sysdata/main
-  // is created by hand in the Firestore console per the message in
-  // server/index.js ("create it first... with { resources: <int>,
-  // minedResources: 0 }"), so a fresh doc that only has `resources` set
-  // (no minedResources yet) previously produced
-  // `resources - undefined` = NaN. Every comparison against NaN is
-  // false, so the `value > nodeMax` downgrade/reject check below never
-  // triggered - the weighted roll's *unfiltered* tier spawned regardless
-  // of how little `resources` actually was, which is why diamond (and
-  // anything else) could show up even with resources pinned to 5.
   const resources = DEMO_MODE ? DEMO_RESOURCES : (Number(sysdata.resources) || 0);
   const minedResources = Number(sysdata.minedResources) || 0;
   return Math.floor((resources - minedResources) / 100);
@@ -67,13 +70,12 @@ function rollOreType(locationConfig, nodeMax) {
   return chosen;
 }
 
-function buildActiveNodeData(locationId, point, sysdata) {
+function buildActiveNodeData(locationId, point, nodeMax) {
   const config = LOCATIONS[locationId];
-  const nodeMax = computeNodeMax(sysdata);
   const oreType = rollOreType(config, nodeMax);
 
   if (!oreType) {
-    return { state: 'depleted', x: point.x, y: point.y, respawnAtMs: Date.now() + 5000 };
+    return { state: 'depleted', x: point.x, y: point.y, respawnAtMs: Date.now() + RESPAWN_DELAY_MS };
   }
 
   return {
@@ -88,22 +90,70 @@ function buildActiveNodeData(locationId, point, sysdata) {
   };
 }
 
-/** Idempotent: only writes nodes that don't already exist. Safe to call on every cold start. */
-async function seedLocationIfEmpty(db, locationId, sysdata) {
-  const config = LOCATIONS[locationId];
-  const col = nodesCollection(db, locationId);
-  const existing = await col.limit(1).get();
-  if (!existing.empty) return;
-
-  const batch = db.batch();
-  config.spawnPoints.forEach((point, i) => {
-    batch.set(col.doc(nodeId(locationId, i)), buildActiveNodeData(locationId, point, sysdata));
-  });
-  await batch.commit();
+/**
+ * Same as buildActiveNodeData, but spends from a shared, mutable budget
+ * across many calls instead of recomputing an independent ceiling each
+ * time. `budget` is a plain `{ remaining: number }` object, mutated in
+ * place - this is what lets reconcileAllLocations hand location 0 first
+ * claim on the mine's total value headroom, and only let higher-numbered
+ * locations spawn ore with whatever's left over, in priority order.
+ */
+function buildActiveNodeDataFromBudget(locationId, point, budget) {
+  const node = buildActiveNodeData(locationId, point, budget.remaining);
+  if (node.state === 'active') budget.remaining -= ORE_TYPES[node.oreType].value;
+  return node;
 }
 
-async function seedAllLocations(db, sysdata) {
-  await Promise.all(Object.keys(LOCATIONS).map((id) => seedLocationIfEmpty(db, Number(id), sysdata)));
+/**
+ * Ensures every location has exactly NODE_SLOTS_PER_LOCATION node docs
+ * (creating whichever are missing), respawns any depleted node whose
+ * respawnAtMs has passed, AND catches any currently-active node that's
+ * worth more than the mine can currently afford (e.g. a diamond node left
+ * over from before sysdata/main.resources was lowered, or from the NaN
+ * budget bug) and rerolls it - previously an over-budget node just sat
+ * there indefinitely once spawned, since only depleted nodes ever got
+ * re-evaluated.
+ *
+ * Spends ONE shared budget across all locations in ascending id order
+ * (location 0 first, then 1, 2, ... up through the highest id), so low
+ * locations get first claim on the mine's value headroom and higher ones
+ * only get ore if there's some left over. This is on top of, not a
+ * replacement for, the per-node ceiling already enforced by
+ * buildActiveNodeData/rollOreType.
+ */
+async function reconcileAllLocations(db, sysdata) {
+  const budget = { remaining: computeNodeMax(sysdata) };
+  const locationIds = Object.keys(LOCATIONS).map(Number).sort((a, b) => a - b);
+  const now = Date.now();
+
+  for (const locationId of locationIds) {
+    const config = LOCATIONS[locationId];
+    const col = nodesCollection(db, locationId);
+    const existingSnap = await col.get();
+    const existingById = new Map(existingSnap.docs.map((d) => [d.id, d.data()]));
+
+    const batch = db.batch();
+    let writes = 0;
+
+    config.spawnPoints.forEach((point, index) => {
+      const id = nodeId(locationId, index);
+      const current = existingById.get(id);
+
+      const dueToRespawn = current && current.state === 'depleted'
+        && current.respawnAtMs != null && current.respawnAtMs <= now;
+      const overBudget = current && current.state === 'active'
+        && ORE_TYPES[current.oreType].value > budget.remaining;
+
+      if (!current || dueToRespawn || overBudget) {
+        batch.set(col.doc(id), buildActiveNodeDataFromBudget(locationId, point, budget));
+        writes++;
+      } else if (current.state === 'active') {
+        budget.remaining -= ORE_TYPES[current.oreType].value; // still reserved, just left as-is
+      }
+    });
+
+    if (writes > 0) await batch.commit();
+  }
 }
 
 /**
@@ -128,7 +178,7 @@ async function strikeNodeTx(db, locationId, nId, account) {
         state: 'depleted',
         strikesRemaining: 0,
         lastHitBy: account,
-        respawnAtMs: Date.now() + 5000
+        respawnAtMs: Date.now() + RESPAWN_DELAY_MS
       });
       return { depleted: true, oreType: node.oreType, value: ORE_TYPES[node.oreType].value };
     }
@@ -138,13 +188,13 @@ async function strikeNodeTx(db, locationId, nId, account) {
   });
 }
 
-/** Called by the respawn task once respawnAtMs has passed. */
+/** Called by the fast per-node respawn sweep once respawnAtMs has passed. */
 async function respawnNode(db, locationId, nId, sysdata) {
   const config = LOCATIONS[locationId];
   const pointIndex = Number(nId.split('-pt')[1]);
   const point = config.spawnPoints[pointIndex];
   const ref = nodesCollection(db, locationId).doc(nId);
-  await ref.set(buildActiveNodeData(locationId, point, sysdata));
+  await ref.set(buildActiveNodeData(locationId, point, computeNodeMax(sysdata)));
 }
 
 module.exports = {
@@ -152,7 +202,7 @@ module.exports = {
   nodesCollection,
   computeNodeMax,
   rollOreType,
-  seedAllLocations,
+  reconcileAllLocations,
   strikeNodeTx,
   respawnNode
 };

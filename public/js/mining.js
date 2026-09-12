@@ -23,12 +23,16 @@
 //   "Cave:" dropdown entirely: each cave is a link in a 0-1-2-3-4-5
 //   chain, and walking through the gap in the east/west wall calls the
 //   same connect() the dropdown used to, via onLocationChange so the UI
-//   can show which cave you're in without polling.
+//   can show which cave you're in without polling. Cave 0 additionally
+//   keeps a standalone locked "Cave Exit" walkway on its own wall.
+// - every landed strike now costs 1 energy server-side (see
+//   server/index.js's /throwPickaxe) - onEnergyChange lets the caller
+//   keep an energy bar in sync without polling for it.
 //
 // Movement/anti-cheat caveat from before still applies: charX/charY are
 // still client-reported, not server-tracked - unchanged in this slice.
 
-import { db, apiFetch } from './firebase-config.js?v=8';
+import { db, apiFetch } from './firebase-config.js?v=9';
 import {
   collection, onSnapshot, query, orderBy, limit, Timestamp
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
@@ -84,6 +88,13 @@ function buildChainExits() {
     if (id < LOCATION_NAMES.length - 1) list.push({ side: 'east', toLocationId: id + 1 });
     exits[id] = list;
   }
+  // Cave 0 additionally gets a standalone "Cave Exit" on its otherwise-
+  // unused west wall - this is the original placeholder walkway from
+  // before the 0-5 chain existed (meant to eventually lead somewhere
+  // outside the numbered caves, e.g. back to a hub/surface). It has no
+  // destination yet, so it's locked: visible (door-frame, iron bars,
+  // padlock label) but not actually walkable, same as before.
+  exits[0].push({ side: 'west', toLocationId: null, locked: true, label: 'Cave Exit' });
   return exits;
 }
 const LOCATION_EXITS = buildChainExits();
@@ -99,9 +110,12 @@ const LOCATION_EXITS = buildChainExits();
  * @param {(id:number)=>void} [opts.onLocationChange] - fired whenever the
  *   active cave changes (initial mount and every walkway crossing), so the
  *   caller can show which cave you're in without polling.
+ * @param {(energy:number)=>void} [opts.onEnergyChange] - fired whenever the
+ *   server reports an updated energy value (after a successful strike),
+ *   so the caller can keep an energy bar in sync without polling.
  * @returns {{ setLocation(id:number): void, destroy(): void }}
  */
-export function mountMine({ canvas, toastEl, account, locationId, spectator = false, onLocationChange }) {
+export function mountMine({ canvas, toastEl, account, locationId, spectator = false, onLocationChange, onEnergyChange }) {
   const ctx = canvas.getContext('2d');
 
   let currentLocationId = locationId;
@@ -228,8 +242,11 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   function computeClampLimits() {
     const half = EXIT_WIDTH / 2;
     const inGapY = player.y >= EXIT_CENTER - half && player.y <= EXIT_CENTER + half;
-    const westExit = getExits().find((e) => e.side === 'west');
-    const eastExit = getExits().find((e) => e.side === 'east');
+    // Locked exits (currently just cave 0's placeholder "Cave Exit") are
+    // rendered like any other opening but stay functionally a wall - you
+    // can walk up to the gap, you just can't pass through it yet.
+    const westExit = getExits().find((e) => e.side === 'west' && !e.locked);
+    const eastExit = getExits().find((e) => e.side === 'east' && !e.locked);
     return {
       minX: (inGapY && westExit) ? -EXIT_DEPTH : 0,
       maxX: (inGapY && eastExit) ? ROOM_SIZE + EXIT_DEPTH : ROOM_SIZE
@@ -261,8 +278,8 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     const inGapY = player.y >= EXIT_CENTER - half && player.y <= EXIT_CENTER + half;
     if (!inGapY) return;
 
-    const westExit = getExits().find((e) => e.side === 'west');
-    const eastExit = getExits().find((e) => e.side === 'east');
+    const westExit = getExits().find((e) => e.side === 'west' && !e.locked);
+    const eastExit = getExits().find((e) => e.side === 'east' && !e.locked);
 
     if (westExit && player.x <= -EXIT_DEPTH + 20) {
       travelTo(westExit.toLocationId, 'east'); // left via the west wall - appear by the new cave's east wall
@@ -337,8 +354,15 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         body: { account, locationId: currentLocationId, nodeId: target ? target.id : null, charX: player.x, charY: player.y, targetX, targetY }
       });
       if (result.depleted) toast(`+1 ${result.oreType} (${result.value} coin value)`);
+      // Every landed strike costs energy server-side now - keep the caller's
+      // energy bar in sync without a separate round trip to getWorkerStatus.
+      if (typeof result.energy === 'number' && onEnergyChange) onEnergyChange(result.energy);
     } catch (err) {
-      console.error('throwPickaxe failed:', err);
+      if (err.message === 'no_energy') {
+        toast("⚡ Out of energy - go rest to recover.");
+      } else {
+        console.error('throwPickaxe failed:', err);
+      }
     }
   }
   canvas.addEventListener('click', onCanvasClick);
@@ -446,11 +470,31 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     ctx.lineTo(wallX, gapBottomY);
     ctx.stroke();
 
+    if (exit.locked) {
+      // Iron-bar gate across the opening - visually says "not open yet"
+      // without needing the player to walk up and bounce off it to find out.
+      ctx.strokeStyle = '#666';
+      ctx.lineWidth = 4;
+      const barCount = 4;
+      for (let i = 1; i <= barCount; i++) {
+        const bx = wallX + ((farX - wallX) * i) / (barCount + 1);
+        const by = gapTopY + ((farTopY - gapTopY) * i) / (barCount + 1);
+        const byBottom = gapBottomY + ((farBottomY - gapBottomY) * i) / (barCount + 1);
+        ctx.beginPath();
+        ctx.moveTo(bx, by);
+        ctx.lineTo(bx, byBottom);
+        ctx.stroke();
+      }
+    }
+
     ctx.font = 'bold 20px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillStyle = '#e8c547';
+    ctx.fillStyle = exit.locked ? '#999' : '#e8c547';
     const arrow = side === 'east' ? '→' : '←';
-    ctx.fillText(`${arrow} ${LOCATION_NAMES[exit.toLocationId]}`, (wallX + farX) / 2, gapTopY - 14);
+    const label = exit.locked
+      ? `🔒 ${exit.label || 'Cave Exit'}`
+      : `${arrow} ${LOCATION_NAMES[exit.toLocationId]}`;
+    ctx.fillText(label, (wallX + farX) / 2, gapTopY - 14);
     ctx.textAlign = 'left';
   }
 
@@ -546,7 +590,17 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     const touchingWall = !spectator && (
       player.x <= minX || player.x >= maxX || player.y <= 0 || player.y >= ROOM_SIZE
     );
-    if (touchingWall && !wasTouchingWall) toast('You hit the cave wall.');
+    if (touchingWall && !wasTouchingWall) {
+      // Distinguish "pressed against a locked walkway" from an ordinary
+      // wall - the generic message was confusing right next to a visible
+      // (but not yet usable) doorway.
+      const half = EXIT_WIDTH / 2;
+      const inGapY = player.y >= EXIT_CENTER - half && player.y <= EXIT_CENTER + half;
+      const lockedExit = inGapY && getExits().find((e) => (
+        (e.side === 'west' && player.x <= minX) || (e.side === 'east' && player.x >= maxX)
+      ) && e.locked);
+      toast(lockedExit ? "🔒 This walkway isn't connected to a cave yet." : 'You hit the cave wall.');
+    }
     wasTouchingWall = touchingWall;
 
     drawFloor();
