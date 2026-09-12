@@ -118,7 +118,7 @@ html, body {
 }
 
 #world-canvas {
-  background: #2b2118;
+  background: #000; /* matches the void beyond the cave now that drawFloor() paints outside-room space black */
   max-width: 90vmin;
   max-height: 70vh;
 }

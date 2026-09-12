@@ -10,9 +10,9 @@
 // Mount once per worker session (index.html's enterWorld() does this);
 // call destroy() when leaving the world so the listener doesn't leak.
 
-import { db } from './firebase-config.js?v=6';
+import { db } from './firebase-config.js?v=7';
 import { collection, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
-import { ORE_COLORS } from './mining.js?v=6';
+import { ORE_COLORS } from './mining.js?v=7';
 
 const TOTAL_SLOTS = 35; // 5 columns x 7 rows, matches the reference mockup
 

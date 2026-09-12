@@ -23,7 +23,7 @@
 // Movement/anti-cheat caveat from before still applies: charX/charY are
 // still client-reported, not server-tracked - unchanged in this slice.
 
-import { db, apiFetch } from './firebase-config.js?v=6';
+import { db, apiFetch } from './firebase-config.js?v=7';
 import {
   collection, onSnapshot, query, orderBy, limit, Timestamp
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
@@ -61,6 +61,23 @@ export const LOCATION_NAMES = [
   'Crag Hollow', 'Rustrock Cavern', 'Aurum Depths',
   'Shardfall Abyss', 'The Noble Chasm', 'Amaurosis'
 ];
+
+// A walkway gap in the east wall leading toward another cave. No
+// destination has been decided yet, so it's locked: visible (so it reads
+// as "coming soon" rather than a bug) but not walkable, and touching it
+// gives its own toast instead of the generic wall one. To wire it up
+// later: set `toLocationId` to one of LOCATION_NAMES's indices (0-5) and
+// flip `locked` to false - clampPlayerPosition() and checkExitTravel()
+// already know how to let the player through and hand off to
+// setLocation() once that happens, no other changes needed.
+const EXIT = {
+  side: 'east', // which room edge the gap opens on
+  center: ROOM_SIZE / 2, // position along that edge, in world units
+  width: 220, // opening width, in world units
+  depth: 160, // how far the passage alcove extends past the wall
+  locked: true,
+  toLocationId: null
+};
 
 /**
  * @param {object} opts
@@ -172,14 +189,52 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
 
+  // The room rect plus, if the exit is unlocked, the little alcove past
+  // the east wall where the walkway leads - lets clampPlayerPosition()
+  // and drawFloor() share one definition of "walkable ground" instead of
+  // drifting out of sync.
+  function exitAlcoveWorldRect() {
+    const half = EXIT.width / 2;
+    if (EXIT.side === 'east') {
+      return { x0: ROOM_SIZE, y0: EXIT.center - half, x1: ROOM_SIZE + EXIT.depth, y1: EXIT.center + half };
+    }
+    return null;
+  }
+
+  function clampPlayerPosition() {
+    player.y = Math.max(0, Math.min(ROOM_SIZE, player.y));
+    const half = EXIT.width / 2;
+    const inGapY = player.y >= EXIT.center - half && player.y <= EXIT.center + half;
+    const maxX = (!EXIT.locked && EXIT.side === 'east' && inGapY) ? ROOM_SIZE + EXIT.depth : ROOM_SIZE;
+    player.x = Math.max(0, Math.min(maxX, player.x));
+  }
+
+  // Dormant until EXIT.locked is flipped off and a toLocationId is set -
+  // walking all the way through the alcove then hands off to the same
+  // connect() the cave dropdown already uses.
+  function checkExitTravel() {
+    if (spectator || EXIT.locked || EXIT.toLocationId === null) return;
+    const half = EXIT.width / 2;
+    const inGapY = player.y >= EXIT.center - half && player.y <= EXIT.center + half;
+    if (EXIT.side === 'east' && inGapY && player.x >= ROOM_SIZE + EXIT.depth - 20) {
+      const destinationId = EXIT.toLocationId;
+      connect(destinationId);
+      currentLocationId = destinationId;
+      player.x = 40;
+      player.y = ROOM_SIZE / 2; // arrive just inside the new cave's west wall
+      camera.x = player.x;
+      camera.y = player.y;
+      toast(`Entered ${LOCATION_NAMES[destinationId]}.`);
+    }
+  }
+
   function updateMovement() {
     const speed = 4;
     if (keys['w']) player.y -= speed;
     if (keys['s']) player.y += speed;
     if (keys['a']) player.x -= speed;
     if (keys['d']) player.x += speed;
-    player.x = Math.max(0, Math.min(ROOM_SIZE, player.x));
-    player.y = Math.max(0, Math.min(ROOM_SIZE, player.y));
+    clampPlayerPosition();
   }
 
   async function onCanvasClick(e) {
@@ -246,32 +301,105 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   canvas.addEventListener('click', onCanvasClick);
 
   function drawFloor() {
+    // Everywhere outside the walkable area is solid black - reads as
+    // "unexplored/off-limits" rather than more cave stretching on forever.
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+    ctx.save();
+    ctx.beginPath();
+    const [rx0, ry0] = toCanvas(0, 0);
+    const [rx1, ry1] = toCanvas(ROOM_SIZE, ROOM_SIZE);
+    ctx.rect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+    const alcove = exitAlcoveWorldRect();
+    if (alcove) {
+      const [ax0, ay0] = toCanvas(alcove.x0, alcove.y0);
+      const [ax1, ay1] = toCanvas(alcove.x1, alcove.y1);
+      ctx.rect(ax0, ay0, ax1 - ax0, ay1 - ay0);
+    }
+    ctx.clip(); // floor pattern below only paints inside the room + alcove now
+
     if (!floorImgLoaded) {
       ctx.fillStyle = '#2b2118'; // fallback while cave_floor.png is still loading
       ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
-      return;
+    } else {
+      if (!floorPattern) floorPattern = ctx.createPattern(floorImg, 'repeat');
+      // Scales+positions the tile pattern in world space (so it pans with the
+      // camera like the floor is actually part of the cave) rather than
+      // staying glued to the canvas the way a CSS background would.
+      const texToCanvas = (SCALE * FLOOR_TILE_WORLD_SIZE) / floorImg.naturalWidth;
+      floorPattern.setTransform(new DOMMatrix([
+        texToCanvas, 0,
+        0, texToCanvas,
+        CANVAS_SIZE / 2 - camera.x * SCALE,
+        CANVAS_SIZE / 2 - camera.y * SCALE
+      ]));
+      ctx.fillStyle = floorPattern;
+      ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
     }
-    if (!floorPattern) floorPattern = ctx.createPattern(floorImg, 'repeat');
-    // Scales+positions the tile pattern in world space (so it pans with the
-    // camera like the floor is actually part of the cave) rather than
-    // staying glued to the canvas the way a CSS background would.
-    const texToCanvas = (SCALE * FLOOR_TILE_WORLD_SIZE) / floorImg.naturalWidth;
-    floorPattern.setTransform(new DOMMatrix([
-      texToCanvas, 0,
-      0, texToCanvas,
-      CANVAS_SIZE / 2 - camera.x * SCALE,
-      CANVAS_SIZE / 2 - camera.y * SCALE
-    ]));
-    ctx.fillStyle = floorPattern;
-    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+    ctx.restore();
   }
 
   function drawWalls() {
     const [x0, y0] = toCanvas(0, 0);
     const [x1, y1] = toCanvas(ROOM_SIZE, ROOM_SIZE);
-    ctx.strokeStyle = '#5a4630';
-    ctx.lineWidth = 14;
-    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 16;
+    ctx.lineCap = 'square';
+
+    // North, west, south walls are always solid.
+    ctx.beginPath();
+    ctx.moveTo(x0, y0); ctx.lineTo(x1, y0);
+    ctx.moveTo(x0, y0); ctx.lineTo(x0, y1);
+    ctx.moveTo(x0, y1); ctx.lineTo(x1, y1);
+    ctx.stroke();
+
+    // East wall is broken by the exit gap.
+    const gapTopWorld = EXIT.center - EXIT.width / 2;
+    const gapBottomWorld = EXIT.center + EXIT.width / 2;
+    const [, gapTopY] = toCanvas(ROOM_SIZE, gapTopWorld);
+    const [, gapBottomY] = toCanvas(ROOM_SIZE, gapBottomWorld);
+    ctx.beginPath();
+    ctx.moveTo(x1, y0); ctx.lineTo(x1, gapTopY);
+    ctx.moveTo(x1, gapBottomY); ctx.lineTo(x1, y1);
+    ctx.stroke();
+
+    drawExit(x1, gapTopWorld, gapBottomWorld, gapTopY, gapBottomY);
+  }
+
+  function drawExit(wallX, gapTopWorld, gapBottomWorld, gapTopY, gapBottomY) {
+    const [farX, farTopY] = toCanvas(ROOM_SIZE + EXIT.depth, gapTopWorld);
+    const [, farBottomY] = toCanvas(ROOM_SIZE + EXIT.depth, gapBottomWorld);
+
+    // Door-frame around the alcove opening, left open on the room side.
+    ctx.strokeStyle = '#3a2c1e';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(wallX, gapTopY);
+    ctx.lineTo(farX, farTopY);
+    ctx.lineTo(farX, farBottomY);
+    ctx.lineTo(wallX, gapBottomY);
+    ctx.stroke();
+
+    if (EXIT.locked) {
+      // Iron bars across the opening - reads as "not open yet", not broken.
+      ctx.strokeStyle = '#666';
+      ctx.lineWidth = 4;
+      const barCount = 4;
+      for (let i = 1; i <= barCount; i++) {
+        const bx = wallX + ((farX - wallX) * i) / (barCount + 1);
+        ctx.beginPath();
+        ctx.moveTo(bx, gapTopY);
+        ctx.lineTo(bx, gapBottomY);
+        ctx.stroke();
+      }
+    }
+
+    ctx.font = 'bold 20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = EXIT.locked ? '#999' : '#e8c547';
+    ctx.fillText(EXIT.locked ? '🔒 Cave Exit' : 'Cave Exit', (wallX + farX) / 2, gapTopY - 14);
+    ctx.textAlign = 'left';
   }
 
   function drawNode(node) {
@@ -364,8 +492,14 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     const touchingWall = !spectator && (
       player.x <= 0 || player.x >= ROOM_SIZE || player.y <= 0 || player.y >= ROOM_SIZE
     );
-    if (touchingWall && !wasTouchingWall) toast('You hit the cave wall.');
+    if (touchingWall && !wasTouchingWall) {
+      const half = EXIT.width / 2;
+      const nearExit = EXIT.side === 'east' && player.x >= ROOM_SIZE
+        && player.y >= EXIT.center - half && player.y <= EXIT.center + half;
+      toast(nearExit ? "🔒 This walkway isn't connected to a cave yet." : 'You hit the cave wall.');
+    }
     wasTouchingWall = touchingWall;
+    if (!spectator) checkExitTravel();
 
     drawFloor();
     drawWalls();

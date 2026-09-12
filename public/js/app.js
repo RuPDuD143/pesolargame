@@ -2,10 +2,10 @@
 // Firebase callables. Logic (render functions, stopwatch, eyelid
 // transition) is otherwise unchanged from the SQL slice.
 
-import { CONFIG, apiFetch } from './firebase-config.js?v=6';
-import * as Wallet from './wallet.js?v=6';
-import { mountMine, LOCATION_NAMES } from './mining.js?v=6';
-import { mountInventory } from './inventory.js?v=6';
+import { CONFIG, apiFetch } from './firebase-config.js?v=7';
+import * as Wallet from './wallet.js?v=7';
+import { mountMine, LOCATION_NAMES } from './mining.js?v=7';
+import { mountInventory } from './inventory.js?v=7';
 
 const screen = document.getElementById('screen');
 let activeMine = null; // torn down whenever we re-render away from the world
