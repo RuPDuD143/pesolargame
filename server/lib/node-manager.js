@@ -226,19 +226,68 @@ async function strikeNodeTx(db, locationId, nId, account, hitCount = 1) {
   });
 }
 
-/** Called by the fast per-node respawn sweep once respawnAtMs has passed. */
-async function respawnNode(db, locationId, nId, sysdata) {
+/**
+ * Sums the *value* of every currently-active node across every location -
+ * i.e. how much of the mine's total nodeMax budget is already spoken for
+ * right now, by nodes nobody has mined out yet.
+ *
+ * This exists so the fast per-node respawn sweep (see respawnNode below)
+ * can know the *true* remaining headroom before rolling a node, instead
+ * of checking a single node's value against the mine's raw, un-decremented
+ * ceiling - which was the bug: computeNodeMax() alone answers "what's the
+ * absolute most the whole mine could ever hold", not "what's left after
+ * everything already spawned". Checking a single 25-value gold node against
+ * a raw ceiling of 34 says "sure, that fits" every single time, with no
+ * memory of the 99 other gold nodes that already passed the exact same
+ * check - that's how a location can end up holding far more total value
+ * than sysdata/main.resources should allow.
+ *
+ * Deliberately recomputed from the node docs themselves (ground truth)
+ * rather than maintained as a running counter on sysdata/main - a counter
+ * would need every single write path that flips a node active/depleted to
+ * remember to keep it in sync (including hand-edits, future code, etc.),
+ * and would silently drift if any of them ever forgot. Six locations of at
+ * most 100 nodes each is cheap enough to just re-read every 5 minutes.
+ */
+async function computeCommittedValue(db) {
+  const locationIds = Object.keys(LOCATIONS);
+  let total = 0;
+
+  for (const locationId of locationIds) {
+    const snap = await nodesCollection(db, locationId).where('state', '==', 'active').get();
+    snap.forEach((doc) => {
+      const { oreType } = doc.data();
+      total += ORE_TYPES[oreType].value;
+    });
+  }
+
+  return total;
+}
+
+/**
+ * Called by the fast per-node respawn sweep once respawnAtMs has passed.
+ *
+ * Takes a shared `budget` (same `{ remaining: number }` shape as
+ * buildActiveNodeDataFromBudget/reconcileAllLocations) rather than raw
+ * sysdata, and spends from it - the caller is responsible for seeding
+ * `budget.remaining` with computeNodeMax(sysdata) minus whatever
+ * computeCommittedValue() already reports as spoken-for, and for calling
+ * this once per due node *sequentially* (not in parallel) so each node
+ * sees what the previous one just reserved. See respawn-sweep.js.
+ */
+async function respawnNode(db, locationId, nId, budget) {
   const config = LOCATIONS[locationId];
   const pointIndex = Number(nId.split('-pt')[1]);
   const point = config.spawnPoints[pointIndex];
   const ref = nodesCollection(db, locationId).doc(nId);
-  await ref.set(buildActiveNodeData(locationId, point, computeNodeMax(sysdata)));
+  await ref.set(buildActiveNodeDataFromBudget(locationId, point, budget));
 }
 
 module.exports = {
   nodeId,
   nodesCollection,
   computeNodeMax,
+  computeCommittedValue,
   rollOreType,
   reconcileAllLocations,
   strikeNodeTx,

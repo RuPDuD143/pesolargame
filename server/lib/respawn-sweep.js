@@ -9,6 +9,18 @@
 //    mined come back reasonably soon, instead of making you wait for the
 //    full sweep below.
 //
+//    Before rolling any of them, it tallies up computeCommittedValue()
+//    (the value already sitting in every other active node in the mine)
+//    and spends a single shared budget down across all of this tick's due
+//    nodes in sequence - the same shared-budget approach reconcileAllLocations
+//    uses below, just scoped to "only the nodes that are due right now"
+//    instead of "every node slot in the game". Previously each due node
+//    checked its own value against computeNodeMax(sysdata) in isolation,
+//    with no memory of every other node also passing that same check -
+//    which is how e.g. Aurum Depths could end up holding 100 separate
+//    25-value gold nodes even though the whole mine's resources only
+//    supported ~34 value worth of ore at once.
+//
 // 2. runSweepIfDue() - the actual "hourly cave refresh": pulls the live
 //    `resources` value from the on-chain contract table (so e.g. voting
 //    actually changes what can spawn, instead of sysdata/main.resources
@@ -49,26 +61,46 @@ const BACKSTOP_CHECK_INTERVAL_MS = 300000; // how often the idle loop checks "is
 function startRespawnSweep(db) {
   setInterval(async () => {
     const now = Date.now();
-    for (const locationId of Object.keys(LOCATIONS)) {
-      try {
-        const snap = await nodeManager
-          .nodesCollection(db, locationId)
-          .where('state', '==', 'depleted')
-          .where('respawnAtMs', '<=', now)
-          .get();
 
-        if (snap.empty) continue;
+    try {
+      const sysSnap = await db.collection('sysdata').doc('main').get();
+      if (!sysSnap.exists) return;
+      const sysdata = sysSnap.data();
 
-        const sysSnap = await db.collection('sysdata').doc('main').get();
-        if (!sysSnap.exists) continue;
-        const sysdata = sysSnap.data();
+      // Everything currently active anywhere in the mine, *before* this
+      // tick touches anything - due nodes are still 'depleted' right now,
+      // so they're correctly excluded already and won't double-count
+      // themselves. This is what turns "does this one node fit under the
+      // mine's raw ceiling" into "does this one node fit in what's
+      // actually left" - see computeCommittedValue's doc comment.
+      const committedValue = await nodeManager.computeCommittedValue(db);
+      const budget = { remaining: nodeManager.computeNodeMax(sysdata) - committedValue };
 
-        await Promise.all(
-          snap.docs.map((doc) => nodeManager.respawnNode(db, locationId, doc.id, sysdata))
-        );
-      } catch (err) {
-        console.error(`respawn sweep failed for location ${locationId}:`, err.message);
+      for (const locationId of Object.keys(LOCATIONS)) {
+        try {
+          const snap = await nodeManager
+            .nodesCollection(db, locationId)
+            .where('state', '==', 'depleted')
+            .where('respawnAtMs', '<=', now)
+            .get();
+
+          if (snap.empty) continue;
+
+          // Sequential on purpose: every respawn spends from the same
+          // shared `budget`, so node N sees whatever node N-1 just
+          // reserved. Running these in parallel (the old Promise.all)
+          // would let every due node check against the same starting
+          // `remaining` and race straight past the real ceiling again -
+          // that race is the whole bug this rewrite exists to close.
+          for (const doc of snap.docs) {
+            await nodeManager.respawnNode(db, locationId, doc.id, budget);
+          }
+        } catch (err) {
+          console.error(`respawn sweep failed for location ${locationId}:`, err.message);
+        }
       }
+    } catch (err) {
+      console.error('respawn sweep failed:', err.message);
     }
   }, FAST_SWEEP_INTERVAL_MS);
 }
