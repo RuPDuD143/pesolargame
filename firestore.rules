@@ -39,8 +39,12 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    match /locations/{locationId}/throws/{throwId} {
-      allow read: if true;
+    // Short-lived server-side state for the orbit-mining flow (see
+    // server/lib/mining-session.js) - purely an implementation detail the
+    // server uses to clamp client-claimed hit counts against real elapsed
+    // time. Never read or written by clients directly.
+    match /miningSessions/{account} {
+      allow read: if false;
       allow write: if false;
     }
 

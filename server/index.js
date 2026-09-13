@@ -21,6 +21,7 @@ const chain = require('./lib/chain');
 const { computeEnergyStatus } = require('./lib/energy');
 const { requestLoginNonce, verifyLogin } = require('./lib/verify-signature');
 const nodeManager = require('./lib/node-manager');
+const miningSession = require('./lib/mining-session');
 const { ORE_ASSET_IDS } = require('./lib/ore-asset-ids');
 const { LOCATIONS } = require('./lib/ore-config');
 const { startRespawnSweep, startNodeReconcileSweep, runSweepIfDue } = require('./lib/respawn-sweep');
@@ -189,44 +190,63 @@ app.post('/wakeWorker', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
-// MINING: strike a node
+// MINING: orbit-swing model - the client plants the character and orbits
+// a pickaxe locally, predicting each hit instantly instead of waiting on
+// a round trip per click (see public/js/mining.js's file header for why
+// that used to feel laggy under spam-clicking). /startMining opens a
+// session and stamps a server-side start time; /mineNode is the single
+// call a whole session makes, whenever it ends (finished or cancelled),
+// carrying however many hits the client thinks landed - clamped against
+// mining-session.js's own clock, not trusted outright. Replaces the old
+// per-click /throwPickaxe entirely.
 // ---------------------------------------------------------------------
 
-const MAX_THROW_DISTANCE = 200; // px, unchanged
-
-app.post('/throwPickaxe', requireAuth, async (req, res) => {
+app.post('/startMining', requireAuth, async (req, res) => {
   try {
-    const { account, locationId, nodeId, charX, charY, targetX, targetY } = req.body || {};
+    const { account, locationId, nodeId, charX, charY } = req.body || {};
     if (!requireClaimedAccount(req, res, account)) return;
     if (!(locationId in LOCATIONS)) return res.status(400).json({ error: 'bad_location' });
 
-    const dx = targetX - charX;
-    const dy = targetY - charY;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    const clampedDist = Math.min(dist, MAX_THROW_DISTANCE);
-    const angle = Math.atan2(dy, dx);
-    const finalX = charX + Math.cos(angle) * clampedDist;
-    const finalY = charY + Math.sin(angle) * clampedDist;
+    const nodeSnap = await nodeManager.nodesCollection(db, locationId).doc(nodeId).get();
+    if (!nodeSnap.exists || nodeSnap.data().state !== 'active') {
+      return res.status(400).json({ error: 'node_not_active' });
+    }
 
-    await db.collection('locations').doc(String(locationId)).collection('throws').add({
-      account,
-      fromX: charX,
-      fromY: charY,
-      toX: finalX,
-      toY: finalY,
-      nodeId: nodeId || null,
-      createdAt: FieldValue.serverTimestamp()
-    });
+    const node = nodeSnap.data();
+    const dist = Math.hypot(node.x - charX, node.y - charY);
+    if (dist > miningSession.MINING_RANGE) {
+      return res.status(400).json({ error: 'out_of_range' });
+    }
 
-    if (!nodeId) return res.json({ struck: false }); // empty-ground throw, animation only - no energy spent
+    await miningSession.startSession(db, account, locationId, nodeId);
+    res.json({ started: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal_error' });
+  }
+});
 
-    // Energy is checked/spent inside strikeNodeTx itself now, atomically
-    // with the strike - see node-manager.js's comment on why: only the
-    // hit that actually depletes the node (mines it out) costs energy,
-    // ordinary hits toward it are free, and if the finishing hit lands
-    // with 0 energy the strike doesn't register at all rather than
-    // wasting the node.
-    const result = await nodeManager.strikeNodeTx(db, locationId, nodeId, account);
+app.post('/mineNode', requireAuth, async (req, res) => {
+  try {
+    const { account, locationId, nodeId, hitCount } = req.body || {};
+    if (!requireClaimedAccount(req, res, account)) return;
+    if (!(locationId in LOCATIONS)) return res.status(400).json({ error: 'bad_location' });
+
+    const session = await miningSession.readAndClearSession(db, account);
+    if (!session || session.locationId !== locationId || session.nodeId !== nodeId) {
+      return res.status(400).json({ error: 'no_active_session' });
+    }
+
+    const claimedHits = Math.max(0, Number(hitCount) || 0);
+    const appliedHits = Math.min(claimedHits, miningSession.maxPlausibleHits(session));
+    if (appliedHits <= 0) return res.json({ struck: false });
+
+    // Energy is checked/spent inside strikeNodeTx itself, atomically with
+    // the strike - see that function's comment on why: only a batch that
+    // actually depletes the node (mines it out) costs energy, and if the
+    // finishing batch lands with 0 energy it doesn't register at all
+    // rather than wasting the node.
+    const result = await nodeManager.strikeNodeTx(db, locationId, nodeId, account, appliedHits);
     if (!result) return res.json({ struck: false }); // already depleted by someone else
     if (result.blocked === 'no_worker_row') return res.status(412).json({ error: 'no_worker_row' });
     if (result.blocked === 'no_energy') return res.status(400).json({ error: 'no_energy' });
@@ -235,7 +255,7 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
       return res.json({ struck: true, depleted: false, strikesRemaining: result.strikesRemaining });
     }
 
-    // Node depleted on this strike: credit the winner and bump world state.
+    // Node depleted on this batch: credit the winner and bump world state.
     await db.runTransaction(async (tx) => {
       const sysdataRef = db.collection('sysdata').doc('main');
       const invRef = db.collection('workers').doc(account).collection('inventory').doc(result.oreType);

@@ -15,7 +15,7 @@
 // itself, it just has to ask, and the server's response feeds back into
 // resetting/holding the countdown correctly either way.
 
-import { db, apiFetch } from './firebase-config.js?v=11';
+import { db, apiFetch } from './firebase-config.js?v=12';
 import { doc, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 
 // Must match server/lib/respawn-sweep.js's SWEEP_HOURS - there's no

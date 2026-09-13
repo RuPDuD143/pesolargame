@@ -157,28 +157,34 @@ async function reconcileAllLocations(db, sysdata) {
 }
 
 /**
- * Applies one pickaxe strike inside a Firestore transaction.
+ * Applies `hitCount` pickaxe strikes inside a Firestore transaction.
  *
- * Energy is only spent - and only required - on the strike that actually
- * depletes the node (i.e. mines it out), not on every hit toward it. That
- * check has to live in the same transaction as the strike itself: if we
- * checked energy beforehand and deducted it afterward as two separate
- * steps, a player who hits 0 energy exactly on what would've been the
- * finishing blow could either get a free ore (checked-then-someone-else's-
- * strike-lands-first race) or, worse, have the node silently consumed
- * with no one credited. Doing it all in one transaction means: if this
- * hit would deplete the node but there's no energy for it, the hit simply
- * doesn't register at all - strikesRemaining stays exactly where it was,
- * and the node is still there once the player has rested.
+ * Energy is only spent - and only required - on the batch that actually
+ * depletes the node (i.e. mines it out), not per individual hit within
+ * it. That check has to live in the same transaction as the strike
+ * itself: if we checked energy beforehand and deducted it afterward as
+ * two separate steps, a player who hits 0 energy exactly on what would've
+ * been the finishing blow could either get a free ore (checked-then-
+ * someone-else's-strike-lands-first race) or, worse, have the node
+ * silently consumed with no one credited. Doing it all in one transaction
+ * means: if this batch would deplete the node but there's no energy for
+ * it, the batch simply doesn't apply at all - strikesRemaining stays
+ * exactly where it was, and the node is still there once the player has
+ * rested.
+ *
+ * hitCount comes from server/index.js's /mineNode, which itself clamps
+ * whatever the client claims against mining-session.js's real,
+ * server-timestamped elapsed time - see that file for why a client-
+ * reported hit count can't be trusted outright.
  *
  * Returns one of:
  *   null                              - node doesn't exist / not active (already depleted by someone else)
  *   { blocked: 'no_worker_row' }      - no workers/{account} doc (shouldn't normally happen - defensive)
- *   { blocked: 'no_energy' }          - this would be the depleting hit, but energy is 0
+ *   { blocked: 'no_energy' }          - this batch would deplete the node, but energy is 0
  *   { depleted: false, strikesRemaining }
- *   { depleted: true, oreType, value, energy } - energy is the balance *after* this strike
+ *   { depleted: true, oreType, value, energy } - energy is the balance *after* this batch
  */
-async function strikeNodeTx(db, locationId, nId, account) {
+async function strikeNodeTx(db, locationId, nId, account, hitCount = 1) {
   const nodeRef = nodesCollection(db, locationId).doc(nId);
   const workerRef = db.collection('workers').doc(account);
 
@@ -188,12 +194,12 @@ async function strikeNodeTx(db, locationId, nId, account) {
     const node = nodeSnap.data();
     if (node.state !== 'active') return null;
 
-    const strikesRemaining = node.strikesRemaining - 1;
+    const strikesRemaining = Math.max(0, node.strikesRemaining - hitCount);
     const wouldDeplete = strikesRemaining <= 0;
 
     if (!wouldDeplete) {
-      // An ordinary hit that doesn't finish the node off - free, no
-      // energy or worker-row check needed.
+      // A batch that doesn't finish the node off - free, no energy or
+      // worker-row check needed.
       tx.update(nodeRef, { strikesRemaining, lastHitBy: account });
       return { depleted: false, strikesRemaining };
     }

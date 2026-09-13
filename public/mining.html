@@ -25,18 +25,18 @@
       <option value="5">Amaurosis</option>
     </select>
     <button id="join">Join</button>
-    <p>WASD to move, click near your character to strike a node.</p>
+    <p>WASD to move, click a nearby (dashed-outline) node to start mining it - click again or press Esc to cancel.</p>
     <p><em>Note: this demo page skips wallet login for quick testing - it calls
-    throwPickaxe with whatever account name you type. Cloud Functions will
-    reject it with unauthenticated unless you've also signed in via
-    index.html first (Firebase Auth session is shared across pages on the
-    same origin).</em></p>
+    /startMining and /mineNode with whatever account name you type. The
+    server will reject it as unauthenticated unless you've also signed in
+    via index.html first (Firebase Auth session is shared across pages on
+    the same origin).</em></p>
   </div>
   <div id="toast"></div>
   <canvas id="canvas" width="800" height="800"></canvas>
 
   <script type="module">
-    import { mountMine } from './js/mining.js?v=11';
+    import { mountMine } from './js/mining.js?v=12';
 
     const canvas = document.getElementById('canvas');
     const toastEl = document.getElementById('toast');

@@ -8,11 +8,13 @@
 // previously enterWorld() was a placeholder <p> and never touched this
 // file at all, so nobody ever saw the mine from the normal login flow.
 //
-// Same Firestore listener approach as before ('location-state' etc. are
-// just onSnapshot() on the nodes/throws collections). New in this pass:
-// - spectator mode: canvas clicks don't call throwPickaxe and no pickaxe
-//   is drawn for the local player; you still see everyone else's nodes
-//   and throws update live.
+// Same Firestore listener approach as before (onSnapshot() on the nodes
+// collection). New in this pass:
+// - spectator ("guest") mode now only disables mining - guests still get
+//   a visible, movable character, camera follow, walls/collision, and
+//   walkway travel like anyone else. Previously all of that was gated
+//   behind `!spectator` too, which is why guests never saw a character
+//   spawn at all - that was a bug, not intentional.
 // - destroy()/setLocation() so callers can tear down or switch caves
 //   without leaking listeners or stacking requestAnimationFrame loops.
 // - zoomed-in camera that eases toward the character instead of showing
@@ -25,19 +27,28 @@
 //   same connect() the dropdown used to, via onLocationChange so the UI
 //   can show which cave you're in without polling. Cave 0 additionally
 //   keeps a standalone locked "Cave Exit" walkway on its own wall.
-// - mining a node out now costs 1 energy server-side (see
-//   server/index.js's /throwPickaxe and node-manager.js's strikeNodeTx -
-//   only the strike that actually depletes the node costs anything,
-//   ordinary hits toward it are free) - onEnergyChange lets the caller
-//   keep an energy bar in sync without polling for it.
+// - mining a node out costs 1 energy server-side (see server/index.js's
+//   /mineNode and node-manager.js's strikeNodeTx - only the hit that
+//   actually depletes the node costs anything) - onEnergyChange lets the
+//   caller keep an energy bar in sync without polling for it.
+// - mining is no longer spam-click-a-throw-per-hit. Clicking an in-range
+//   node (see MINING_RANGE - in-range nodes get a dashed outline) starts
+//   a mining session: the character plants and a pickaxe orbits it,
+//   landing one hit per orbit (see ORBIT_PERIOD_MS). The node's displayed
+//   HP is predicted client-side the instant each hit lands rather than
+//   waiting on a server round trip - spam-clicking used to feel laggy
+//   for exactly that reason. Only one server call actually happens per
+//   session, when it finishes (or is cancelled - clicking again or
+//   pressing Escape while mining does that), carrying however many hits
+//   landed; the server independently clamps that count against how much
+//   real time the session has actually been open (see /startMining and
+//   /mineNode in server/index.js) rather than trusting it outright.
 //
 // Movement/anti-cheat caveat from before still applies: charX/charY are
 // still client-reported, not server-tracked - unchanged in this slice.
 
-import { db, apiFetch } from './firebase-config.js?v=11';
-import {
-  collection, onSnapshot, query, orderBy, limit, Timestamp
-} from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
+import { db, apiFetch } from './firebase-config.js?v=12';
+import { collection, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 
 const ROOM_SIZE = 2000;
 const CANVAS_SIZE = 800;
@@ -47,9 +58,9 @@ const SCALE = BASE_SCALE * ZOOM; // world units -> canvas pixels, zoomed in
 const PLAYER_RADIUS = 50; // canvas px - 100px diameter, per the 100x100 ask
 const NODE_RADIUS = 70; // canvas px - kept at the old node:player size ratio (14:10)
 const CAMERA_FOLLOW = 0.08; // 0-1 per frame - how quickly the camera eases toward the character (lower = laggier/smoother)
-const HIT_RADIUS = 50; // world units - click-proximity radius, unrelated to pixel sizes above
-const THROW_LEG_MS = 150;
-const MAX_THROW_DISTANCE = 200; // world units - must match server/index.js's MAX_THROW_DISTANCE
+const HIT_RADIUS = 50; // world units - click-proximity tolerance for "which node did you click", unrelated to pixel sizes above
+const MINING_RANGE = 150; // world units - how close the character has to be to a node to mine it; must match server/lib/mining-session.js's MINING_RANGE
+const ORBIT_PERIOD_MS = 500; // one orbit = one hit; must match server/lib/mining-session.js's MINE_ORBIT_PERIOD_MS
 
 export const ORE_COLORS = {
   stone: '#8a8a8a', iron: '#a5673f', gold: '#e8c547',
@@ -107,15 +118,15 @@ const LOCATION_EXITS = buildChainExits();
  * @param {HTMLElement} opts.toastEl
  * @param {string} opts.account
  * @param {number} opts.locationId
- * @param {boolean} [opts.spectator] - if true, no pickaxe is drawn/thrown
- *   for the local player; the cave and everyone else's activity still render.
+ * @param {boolean} [opts.spectator] - "guest" mode: the character still
+ *   spawns, moves, and can use walkways, but can't start mining a node.
  * @param {(id:number)=>void} [opts.onLocationChange] - fired whenever the
  *   active cave changes (initial mount and every walkway crossing), so the
  *   caller can show which cave you're in without polling.
  * @param {(energy:number)=>void} [opts.onEnergyChange] - fired whenever the
- *   server reports an updated energy value (after a strike that actually
- *   depleted a node - see mining.js's header note above), so the caller
- *   can keep an energy bar in sync without polling.
+ *   server reports an updated energy value (after a mining session that
+ *   actually depleted a node), so the caller can keep an energy bar in
+ *   sync without polling.
  * @returns {{ setLocation(id:number): void, destroy(): void }}
  */
 export function mountMine({ canvas, toastEl, account, locationId, spectator = false, onLocationChange, onEnergyChange }) {
@@ -125,22 +136,19 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   let nodes = new Map(); // nodeId -> node
   const player = { x: 1000, y: 1000 };
   // Camera is in world coordinates and marks what's drawn at canvas-center.
-  // Spectators have no character to follow, so it just sits at room-center;
-  // players start it already on them so it doesn't slide in from the origin.
-  const camera = { x: spectator ? ROOM_SIZE / 2 : player.x, y: spectator ? ROOM_SIZE / 2 : player.y };
+  const camera = { x: player.x, y: player.y };
   let floorPattern = null; // built lazily once floorImg has actually loaded
   let wasTouchingWall = false; // edge-detects wall contact so the toast fires once, not every frame
   const keys = {};
-  let throws = [];
   let unsubNodes = null;
-  let unsubThrows = null;
   let rafId = null;
   let destroyed = false;
-  // Reset per connect() (see below), not just once at mount - otherwise
-  // switching locations and switching back replays that location's whole
-  // recent throw history in one burst, since a fresh onSnapshot() always
-  // reports its initial docs as 'added'.
-  let sessionStartedAt = Timestamp.now();
+
+  // Active mining session, or null when idle/moving freely. localStrikesRemaining
+  // is the client's own running prediction of the node's HP (see loop()'s
+  // orbit-completion check below) - only pendingHits actually gets sent to
+  // the server, once, when the session ends (see finalizeMining).
+  let miningState = null;
 
   function toast(msg) {
     const div = document.createElement('div');
@@ -153,6 +161,10 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     return LOCATION_EXITS[currentLocationId] || [];
   }
 
+  function distanceToNode(node) {
+    return Math.hypot(node.x - player.x, node.y - player.y);
+  }
+
   // World -> canvas, relative to wherever the camera currently is (see
   // updateCamera below) rather than a fixed room->canvas mapping - that's
   // what makes the view pan as the camera follows the character.
@@ -163,11 +175,11 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     ];
   }
 
-  // Inverse of toCanvas - eases the camera toward the character each frame
-  // instead of snapping to it, so movement feels like a "follow" rather
-  // than the view being rigidly locked to the player.
+  // Eases the camera toward the character each frame instead of snapping
+  // to it, so movement feels like a "follow" rather than the view being
+  // rigidly locked to the player. Runs for guests too now - see the file
+  // header note on why that wasn't happening before.
   function updateCamera() {
-    if (spectator) return; // nothing to follow
     camera.x += (player.x - camera.x) * CAMERA_FOLLOW;
     camera.y += (player.y - camera.y) * CAMERA_FOLLOW;
   }
@@ -175,11 +187,8 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   function connect(id) {
     currentLocationId = id;
     nodes = new Map();
-    throws = [];
-    sessionStartedAt = Timestamp.now(); // fresh cutoff for *this* join, see note above
 
     if (unsubNodes) unsubNodes();
-    if (unsubThrows) unsubThrows();
 
     const nodesRef = collection(db, 'locations', String(currentLocationId), 'nodes');
     unsubNodes = onSnapshot(nodesRef, (snap) => {
@@ -195,31 +204,13 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
       });
     });
 
-    // Only react to throws added after we joined, so we don't replay history.
-    const throwsRef = query(
-      collection(db, 'locations', String(currentLocationId), 'throws'),
-      orderBy('createdAt', 'desc'),
-      limit(20)
-    );
-    unsubThrows = onSnapshot(throwsRef, (snap) => {
-      snap.docChanges().forEach((change) => {
-        if (change.type !== 'added') return;
-        const t = change.doc.data();
-        if (!t.createdAt || t.createdAt.toMillis() < sessionStartedAt.toMillis()) return;
-        // Our own throws are already animated optimistically in
-        // onCanvasClick below - pushing them again here (using the
-        // server's clamped/corrected coordinates) is what caused the
-        // "throws far, snaps back, then throws again at the right
-        // length" double-animation.
-        if (t.account === account) return;
-        throws.push({ thrower: t.account, fromX: t.fromX, fromY: t.fromY, toX: t.toX, toY: t.toY, start: performance.now() });
-      });
-    });
-
     if (onLocationChange) onLocationChange(id);
   }
 
-  function onKeyDown(e) { keys[e.key.toLowerCase()] = true; }
+  function onKeyDown(e) {
+    keys[e.key.toLowerCase()] = true;
+    if (e.key === 'Escape' && miningState) finalizeMining();
+  }
   function onKeyUp(e) { keys[e.key.toLowerCase()] = false; }
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
@@ -276,7 +267,6 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   }
 
   function checkExitTravel() {
-    if (spectator) return;
     const half = EXIT_WIDTH / 2;
     const inGapY = player.y >= EXIT_CENTER - half && player.y <= EXIT_CENTER + half;
     if (!inGapY) return;
@@ -292,6 +282,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   }
 
   function updateMovement() {
+    if (miningState) return; // planted in place while mining - see the file header note
     const speed = 4;
     if (keys['w']) player.y -= speed;
     if (keys['s']) player.y += speed;
@@ -300,25 +291,75 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     clampPlayerPosition();
   }
 
+  async function startMining(node) {
+    try {
+      await apiFetch('/startMining', {
+        method: 'POST',
+        authRequired: true,
+        body: { account, locationId: currentLocationId, nodeId: node.id, charX: player.x, charY: player.y }
+      });
+      miningState = {
+        nodeId: node.id,
+        localStrikesRemaining: node.strikesRemaining,
+        pendingHits: 0,
+        orbitStartTime: performance.now(),
+        lastCompletedOrbits: 0
+      };
+    } catch (err) {
+      toast(err.message === 'out_of_range' ? 'Too far to mine - get closer.' : "Can't mine that right now.");
+    }
+  }
+
+  // Ends the current mining session, however it ended (finished or
+  // cancelled), and syncs whatever hits actually landed with the server -
+  // this is the ONLY network call a whole session makes, no matter how
+  // many orbits/hits happened locally.
+  async function finalizeMining() {
+    if (!miningState) return;
+    const { nodeId, pendingHits } = miningState;
+    miningState = null; // stop orbiting immediately - don't wait on the network for that
+
+    if (pendingHits === 0) return; // cancelled before completing even one orbit - nothing to sync
+
+    try {
+      const result = await apiFetch('/mineNode', {
+        method: 'POST',
+        authRequired: true,
+        body: { account, locationId: currentLocationId, nodeId, hitCount: pendingHits }
+      });
+      if (result.depleted) toast(`+1 ${result.oreType} (${result.value} coin value)`);
+      if (typeof result.energy === 'number' && onEnergyChange) onEnergyChange(result.energy);
+    } catch (err) {
+      if (err.message === 'no_energy') {
+        toast('⚡ Out of energy - go rest to recover.');
+      } else {
+        console.error('mineNode failed:', err);
+        toast("Mining didn't register - try again.");
+      }
+    }
+  }
+
   async function onCanvasClick(e) {
-    if (spectator || !account) return; // spectators have no pickaxe to throw
+    if (spectator || !account) return; // guests can move and explore, but can't mine
+
+    if (miningState) {
+      // Already mining - a click during an active session cancels it.
+      // Progress made so far still gets sent to the server (finalizeMining
+      // only skips the network call if literally nothing landed yet).
+      finalizeMining();
+      return;
+    }
+
     const rect = canvas.getBoundingClientRect();
     // canvas.width/height is the fixed internal drawing resolution (800x800),
     // but rect.width/height is however big CSS actually renders it on screen
     // (#world-canvas has max-width:90vmin/max-height:70vh, so on most
-    // screens it's shown smaller than 800px). Dividing straight by the
-    // constant SCALE assumed rect size === CANVAS_SIZE, so on any screen
-    // where CSS shrinks the canvas, clicks landed on the wrong world
-    // coordinate - the pickaxe flew off toward a spot near, but not at,
-    // the cursor, and near-miss clicks on a node never found it within
-    // HIT_RADIUS. Converting through the *actual* displayed size first
-    // fixes both.
+    // screens it's shown smaller than 800px). Converting through the
+    // *actual* displayed size first is what makes clicks land accurately.
     const displayToInternalX = canvas.width / rect.width;
     const displayToInternalY = canvas.height / rect.height;
     const canvasX = (e.clientX - rect.left) * displayToInternalX;
     const canvasY = (e.clientY - rect.top) * displayToInternalY;
-    // Inverse of toCanvas() - has to account for the camera offset now
-    // that the view pans, not just the flat world->canvas SCALE.
     const clickX = camera.x + (canvasX - CANVAS_SIZE / 2) / SCALE;
     const clickY = camera.y + (canvasY - CANVAS_SIZE / 2) / SCALE;
 
@@ -331,42 +372,14 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         target = node;
       }
     }
+    if (!target) return; // clicked empty ground - nothing to do
 
-    const targetX = target ? target.x : clickX;
-    const targetY = target ? target.y : clickY;
-
-    // Clamp the same way the server does before animating - otherwise a
-    // far-off click animates a full-length throw locally, then a second,
-    // shorter "corrected" one once the server's clamped result comes back.
-    const dx = targetX - player.x;
-    const dy = targetY - player.y;
-    const dist = Math.hypot(dx, dy);
-    const clampedDist = Math.min(dist, MAX_THROW_DISTANCE);
-    const angle = Math.atan2(dy, dx);
-    const finalX = player.x + Math.cos(angle) * clampedDist;
-    const finalY = player.y + Math.sin(angle) * clampedDist;
-
-    // Optimistic local animation - server broadcast (via the throws
-    // listener) will also show this to other players.
-    throws.push({ thrower: account, fromX: player.x, fromY: player.y, toX: finalX, toY: finalY, start: performance.now() });
-
-    try {
-      const result = await apiFetch('/throwPickaxe', {
-        method: 'POST',
-        authRequired: true,
-        body: { account, locationId: currentLocationId, nodeId: target ? target.id : null, charX: player.x, charY: player.y, targetX, targetY }
-      });
-      if (result.depleted) toast(`+1 ${result.oreType} (${result.value} coin value)`);
-      // Every landed strike costs energy server-side now - keep the caller's
-      // energy bar in sync without a separate round trip to getWorkerStatus.
-      if (typeof result.energy === 'number' && onEnergyChange) onEnergyChange(result.energy);
-    } catch (err) {
-      if (err.message === 'no_energy') {
-        toast("⚡ Out of energy - go rest to recover.");
-      } else {
-        console.error('throwPickaxe failed:', err);
-      }
+    if (distanceToNode(target) > MINING_RANGE) {
+      toast('Too far to mine - get closer.');
+      return;
     }
+
+    startMining(target);
   }
   canvas.addEventListener('click', onCanvasClick);
 
@@ -504,6 +517,23 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   function drawNode(node) {
     const [cx, cy] = toCanvas(node.x, node.y);
     const color = ORE_COLORS[node.oreType] || '#fff';
+    const isTarget = miningState && miningState.nodeId === node.id;
+    const inRange = !spectator && account && !miningState && distanceToNode(node) <= MINING_RANGE;
+
+    // Dashed outline = "in reach, click to mine". Solid orange = "this is
+    // what you're currently mining". Neither is drawn for out-of-range
+    // nodes, guests, or (for the plain in-range ring) while already mining
+    // something else, since you can't start a second session anyway.
+    if (isTarget || inRange) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, NODE_RADIUS + 8, 0, Math.PI * 2);
+      ctx.strokeStyle = isTarget ? '#ff9d3a' : '#fff59d';
+      ctx.lineWidth = isTarget ? 5 : 3;
+      if (!isTarget) ctx.setLineDash([6, 6]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     ctx.beginPath();
     ctx.arc(cx, cy, NODE_RADIUS, 0, Math.PI * 2);
     ctx.fillStyle = color;
@@ -514,8 +544,12 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
 
     // "3/375"-style progress readout instead of a plain bar - a bar alone
     // gave no sense of scale, so high-strike ore (diamond etc.) looked
-    // permanently stuck rather than just needing a lot more hits.
-    const label = `${node.strikesRemaining}/${node.maxStrikes}`;
+    // permanently stuck rather than just needing a lot more hits. While
+    // actively mining this node, show the client-predicted HP instead of
+    // whatever Firestore last confirmed - that's the whole point of
+    // predicting locally, see the file header note on why.
+    const shown = isTarget ? Math.max(0, miningState.localStrikesRemaining) : node.strikesRemaining;
+    const label = `${shown}/${node.maxStrikes}`;
     ctx.font = `bold ${Math.round(NODE_RADIUS * 0.34)}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -554,43 +588,61 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     ctx.textAlign = 'center';
     ctx.font = `${Math.round(PLAYER_RADIUS * 0.28)}px sans-serif`;
     ctx.fillText(label, cx, cy - PLAYER_RADIUS - 10);
+
+    if (miningState) {
+      ctx.font = '16px sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.fillText('Mining... click or Esc to cancel', cx, cy + PLAYER_RADIUS + 26);
+    }
     ctx.textAlign = 'left';
   }
 
-  function drawThrows(now) {
-    throws = throws.filter((t) => now - t.start < THROW_LEG_MS * 2);
-    for (const t of throws) {
-      const elapsed = now - t.start;
-      let px, py;
-      if (elapsed < THROW_LEG_MS) {
-        const progress = elapsed / THROW_LEG_MS;
-        px = t.fromX + (t.toX - t.fromX) * progress;
-        py = t.fromY + (t.toY - t.fromY) * progress;
-      } else {
-        const progress = (elapsed - THROW_LEG_MS) / THROW_LEG_MS;
-        px = t.toX + (t.fromX - t.toX) * progress;
-        py = t.toY + (t.fromY - t.toY) * progress;
-      }
-      const [cx, cy] = toCanvas(px, py);
-      const size = 50 * SCALE;
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.fillStyle = '#c0c0c0';
-      ctx.fillRect(-size / 2, -size / 2, size, size);
-      ctx.strokeStyle = '#555';
-      ctx.strokeRect(-size / 2, -size / 2, size, size);
-      ctx.restore();
-    }
+  // The orbiting pickaxe - one full revolution = one hit (see loop() for
+  // where that's actually counted). Purely visual; only one can ever
+  // exist per character since starting a session requires not already
+  // being in one.
+  function drawMiningPickaxe() {
+    if (!miningState) return;
+    const elapsed = performance.now() - miningState.orbitStartTime;
+    const angle = ((elapsed % ORBIT_PERIOD_MS) / ORBIT_PERIOD_MS) * Math.PI * 2;
+    const [cx, cy] = toCanvas(player.x, player.y);
+    const orbitRadiusPx = PLAYER_RADIUS * 1.5;
+    const px = cx + Math.cos(angle) * orbitRadiusPx;
+    const py = cy + Math.sin(angle) * orbitRadiusPx;
+
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(angle + Math.PI / 2);
+    ctx.fillStyle = '#c0c0c0';
+    ctx.fillRect(-8, -14, 16, 28);
+    ctx.strokeStyle = '#555';
+    ctx.strokeRect(-8, -14, 16, 28);
+    ctx.restore();
   }
 
   function loop() {
     if (destroyed) return;
-    if (!spectator) updateMovement();
-    if (!spectator) checkExitTravel(); // may relocate the player to a new cave
+    updateMovement(); // guests move too now; frozen automatically while mining (see updateMovement)
+    checkExitTravel();
     updateCamera();
 
+    // Advance the mining swing, if any, and apply any newly-completed
+    // orbit(s) as instant local hits. finalizeMining (triggered once HP
+    // hits 0) is the only point any of this actually reaches the server.
+    if (miningState) {
+      const elapsed = performance.now() - miningState.orbitStartTime;
+      const completedOrbits = Math.floor(elapsed / ORBIT_PERIOD_MS);
+      if (completedOrbits > miningState.lastCompletedOrbits) {
+        const newHits = completedOrbits - miningState.lastCompletedOrbits;
+        miningState.lastCompletedOrbits = completedOrbits;
+        miningState.pendingHits += newHits;
+        miningState.localStrikesRemaining -= newHits;
+        if (miningState.localStrikesRemaining <= 0) finalizeMining();
+      }
+    }
+
     const { minX, maxX } = computeClampLimits();
-    const touchingWall = !spectator && (
+    const touchingWall = (
       player.x <= minX || player.x >= maxX || player.y <= 0 || player.y >= ROOM_SIZE
     );
     if (touchingWall && !wasTouchingWall) {
@@ -609,8 +661,8 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     drawFloor();
     drawWalls();
     for (const node of nodes.values()) drawNode(node);
-    if (!spectator) drawCharacter(player.x, player.y, account || '', touchingWall);
-    drawThrows(performance.now());
+    drawCharacter(player.x, player.y, account || '', touchingWall);
+    drawMiningPickaxe();
     rafId = requestAnimationFrame(loop);
   }
 
@@ -623,7 +675,6 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
       destroyed = true;
       if (rafId) cancelAnimationFrame(rafId);
       if (unsubNodes) unsubNodes();
-      if (unsubThrows) unsubThrows();
       canvas.removeEventListener('click', onCanvasClick);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
