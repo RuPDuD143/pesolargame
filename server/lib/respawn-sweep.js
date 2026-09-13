@@ -1,42 +1,50 @@
 // server/lib/respawn-sweep.js
 //
-// Two separate loops, on purpose:
+// Three things live here now:
 //
 // 1. startRespawnSweep() - fast, frequent (every 5 minutes). Only
 //    respawns nodes that are already marked 'depleted' with a
 //    respawnAtMs that's passed (set by node-manager.strikeNodeTx the
 //    moment a node gets mined out). This is what makes a node you just
 //    mined come back reasonably soon, instead of making you wait for the
-//    once-an-hour pass below.
+//    full sweep below.
 //
-// 2. startNodeReconcileSweep() - slow, thorough (every 1 hour). Runs
-//    node-manager.reconcileAllLocations(), which does three things every
-//    location doesn't already have exactly NODE_SLOTS_PER_LOCATION docs
-//    (tops it up), catches any depleted node the fast sweep hasn't gotten
-//    to yet, AND catches any currently-ACTIVE node whose ore is worth
-//    more than the mine can currently afford - e.g. a diamond node that
-//    spawned before sysdata/main.resources was lowered, or from the NaN
-//    budget bug - and rerolls it. That last part is the piece the fast
-//    sweep never did: it only ever looked at already-depleted nodes, so
-//    an over-budget node that was still active just sat there forever.
-//    Runs once immediately on boot too, not just after the first hour,
-//    so a fresh deploy doesn't wait an hour to fix/populate anything.
+// 2. runSweepIfDue() - the actual "hourly cave refresh": pulls the live
+//    `resources` value from the on-chain contract table (so e.g. voting
+//    actually changes what can spawn, instead of sysdata/main.resources
+//    being a number someone has to hand-edit in the Firestore console
+//    forever), writes it into sysdata/main, then reconciles every
+//    location against it (see node-manager.reconcileAllLocations - tops
+//    locations up to NODE_SLOTS_PER_LOCATION, respawns anything due, and
+//    rerolls any active node that's grown too valuable for the budget).
 //
-// On serverless Cloud Functions a bare setInterval couldn't be trusted to
-// survive a cold shutdown, which is why the original design used Cloud
-// Tasks (paid Blaze plan). This server is a normal always-on Node
-// process, so a couple of plain interval loops are just as reliable and
-// need zero extra infrastructure.
+//    This does NOT run unconditionally - it first checks sysdata/main's
+//    `lastSweep` timestamp and does nothing if less than SWEEP_HOURS has
+//    passed. Both the interval loop below AND the client-facing
+//    /runSweep endpoint (server/index.js) call this exact same function,
+//    so "H:MM:SS until cave refresh" on the client and what the server
+//    actually does are reading/driving the same clock instead of two
+//    independent timers that can drift apart. The due-check + claiming
+//    lastSweep happen inside one Firestore transaction, so two people
+//    loading the game at the same moment the countdown hits zero can't
+//    both trigger a full sweep.
 //
-// Note: on a free host that spins your service down after inactivity
-// (e.g. Render's free tier), these loops simply aren't running while the
-// service is asleep - both sweeps just resume on the next visit.
+// 3. startNodeReconcileSweep() - a lightweight backstop that just calls
+//    runSweepIfDue() every few minutes, in case nobody's client happens
+//    to be open right when the countdown expires. On a host that spins
+//    down when idle (e.g. Render's free tier) this loop simply isn't
+//    running while asleep - the /runSweep endpoint is what actually
+//    guarantees a refresh happens promptly once someone visits again.
 
+const { Timestamp } = require('firebase-admin/firestore');
 const { LOCATIONS } = require('./ore-config');
 const nodeManager = require('./node-manager');
+const chain = require('./chain');
 
 const FAST_SWEEP_INTERVAL_MS = 300000; // 5 minutes
-const RECONCILE_INTERVAL_MS = 3600000; // 1 hour, per request
+const SWEEP_HOURS = 1; // "H:MM:SS until cave refresh" counts down from this
+const SWEEP_INTERVAL_MS = SWEEP_HOURS * 3600000;
+const BACKSTOP_CHECK_INTERVAL_MS = 300000; // how often the idle loop checks "is it due yet" - cheap, one doc read
 
 function startRespawnSweep(db) {
   setInterval(async () => {
@@ -65,21 +73,73 @@ function startRespawnSweep(db) {
   }, FAST_SWEEP_INTERVAL_MS);
 }
 
+/**
+ * Runs the full hourly reconcile, but only if it's actually due - checked
+ * and claimed atomically so concurrent callers (the backstop loop and any
+ * number of clients whose countdown just hit zero) can't double-run it.
+ * Returns { ran: boolean, nextSweepAtMs: number, resources?: number }.
+ */
+async function runSweepIfDue(db) {
+  const sysdataRef = db.collection('sysdata').doc('main');
+
+  const claim = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(sysdataRef);
+    if (!snap.exists) return { due: false, missing: true };
+
+    const sysdata = snap.data();
+    const now = Date.now();
+    const lastSweepMs = sysdata.lastSweep ? sysdata.lastSweep.toMillis() : 0;
+    const dueAtMs = lastSweepMs + SWEEP_INTERVAL_MS;
+
+    if (now < dueAtMs) return { due: false, dueAtMs };
+
+    // Claim it immediately, before doing any of the (slower) chain RPC /
+    // reconcile work below, so a second caller arriving a moment later
+    // sees lastSweep already bumped and backs off.
+    tx.update(sysdataRef, { lastSweep: Timestamp.now() });
+    return { due: true, sysdata };
+  });
+
+  if (!claim.due) {
+    return { ran: false, nextSweepAtMs: claim.dueAtMs ?? Date.now() };
+  }
+
+  // Pull the live economy number from the chain. If the RPC call fails
+  // for any reason, fall back to whatever sysdata/main.resources already
+  // said rather than aborting the whole sweep - a stale-but-known number
+  // is better than skipping node reconciliation entirely.
+  //
+  // The contract's row field is called `treasury` (per its ABI -
+  // sysdata_row = { treasury: int64 }), not `resources` - Firestore keeps
+  // calling its mirror of it `resources` since that's the name the rest
+  // of this codebase (computeNodeMax, etc.) already uses.
+  let resources = claim.sysdata.resources;
+  try {
+    const row = await chain.getContractSysdata();
+    if (row && row.treasury != null) {
+      resources = Number(row.treasury);
+      await sysdataRef.update({ resources });
+    }
+  } catch (err) {
+    console.error('runSweepIfDue: chain sysdata fetch failed, using existing Firestore value:', err.message);
+  }
+
+  const freshSnap = await sysdataRef.get();
+  await nodeManager.reconcileAllLocations(db, freshSnap.data());
+
+  return { ran: true, nextSweepAtMs: Date.now() + SWEEP_INTERVAL_MS, resources };
+}
+
 function startNodeReconcileSweep(db) {
-  async function runOnce() {
+  async function tick() {
     try {
-      const sysSnap = await db.collection('sysdata').doc('main').get();
-      if (!sysSnap.exists) {
-        console.error('node reconcile sweep: sysdata/main doc missing - skipping this pass');
-        return;
-      }
-      await nodeManager.reconcileAllLocations(db, sysSnap.data());
+      await runSweepIfDue(db);
     } catch (err) {
       console.error('node reconcile sweep failed:', err.message);
     }
   }
-  runOnce(); // don't make a fresh deploy wait a full hour for the first pass
-  setInterval(runOnce, RECONCILE_INTERVAL_MS);
+  tick(); // don't make a fresh deploy wait for the first backstop check
+  setInterval(tick, BACKSTOP_CHECK_INTERVAL_MS);
 }
 
-module.exports = { startRespawnSweep, startNodeReconcileSweep };
+module.exports = { startRespawnSweep, startNodeReconcileSweep, runSweepIfDue, SWEEP_INTERVAL_MS };

@@ -99,6 +99,12 @@ html, body {
   margin-bottom: 8px;
 }
 
+.cave-refresh-label {
+  font-size: 0.85rem;
+  color: #d4af37;
+  margin-top: 2px;
+}
+
 .energy-bar-wrap {
   width: 220px;
   height: 14px;

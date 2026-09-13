@@ -23,7 +23,7 @@ const { requestLoginNonce, verifyLogin } = require('./lib/verify-signature');
 const nodeManager = require('./lib/node-manager');
 const { ORE_ASSET_IDS } = require('./lib/ore-asset-ids');
 const { LOCATIONS } = require('./lib/ore-config');
-const { startRespawnSweep, startNodeReconcileSweep } = require('./lib/respawn-sweep');
+const { startRespawnSweep, startNodeReconcileSweep, runSweepIfDue } = require('./lib/respawn-sweep');
 
 // ---------------------------------------------------------------------
 // Firebase Admin init - reads the FULL service account JSON from an env
@@ -298,6 +298,28 @@ app.get('/seedLocations', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).send('error');
+  }
+});
+
+// ---------------------------------------------------------------------
+// This is the "cave refresh" the client's H:MM:SS countdown is counting
+// down to (see public/js/mining.js) - it reads sysdata/main.lastSweep and
+// calls this the moment the countdown reaches zero. Unlike /seedLocations
+// above (an unconditional manual admin override), this one only actually
+// does anything once an hour has genuinely passed since the last sweep -
+// see runSweepIfDue()'s Firestore transaction for how that's enforced
+// even if several people's countdowns hit zero at once. Safe to expose
+// publicly and to call as often as the client likes; it's a cheap no-op
+// the rest of the time.
+// ---------------------------------------------------------------------
+
+app.post('/runSweep', async (req, res) => {
+  try {
+    const result = await runSweepIfDue(db);
+    res.json(result);
+  } catch (err) {
+    console.error('runSweep failed:', err);
+    res.status(500).json({ error: 'internal_error' });
   }
 });
 

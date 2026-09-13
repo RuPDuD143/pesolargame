@@ -32,7 +32,7 @@
 // Movement/anti-cheat caveat from before still applies: charX/charY are
 // still client-reported, not server-tracked - unchanged in this slice.
 
-import { db, apiFetch } from './firebase-config.js?v=9';
+import { db, apiFetch } from './firebase-config.js?v=10';
 import {
   collection, onSnapshot, query, orderBy, limit, Timestamp
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';

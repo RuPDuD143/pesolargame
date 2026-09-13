@@ -2,14 +2,16 @@
 // Firebase callables. Logic (render functions, stopwatch, eyelid
 // transition) is otherwise unchanged from the SQL slice.
 
-import { CONFIG, apiFetch } from './firebase-config.js?v=9';
-import * as Wallet from './wallet.js?v=9';
-import { mountMine, LOCATION_NAMES } from './mining.js?v=9';
-import { mountInventory } from './inventory.js?v=9';
+import { CONFIG, apiFetch } from './firebase-config.js?v=10';
+import * as Wallet from './wallet.js?v=10';
+import { mountMine, LOCATION_NAMES } from './mining.js?v=10';
+import { mountInventory } from './inventory.js?v=10';
+import { mountCaveRefreshCountdown } from './cave-refresh.js?v=10';
 
 const screen = document.getElementById('screen');
 let activeMine = null; // torn down whenever we re-render away from the world
 let activeInventory = null; // same - only exists while in the world
+let activeCaveRefresh = null; // same - the "H:MM:SS until cave refresh" countdown
 
 function render(html) {
   if (activeMine) {
@@ -19,6 +21,10 @@ function render(html) {
   if (activeInventory) {
     activeInventory.destroy();
     activeInventory = null;
+  }
+  if (activeCaveRefresh) {
+    activeCaveRefresh.destroy();
+    activeCaveRefresh = null;
   }
   screen.innerHTML = html;
 }
@@ -116,6 +122,7 @@ function enterWorld(account, { spectator, energy, energyMax }) {
           <p>Energy: <span id="energy-label-val">${energy}</span> / ${energyMax}</p>
         `}
         <p>Cave: <span id="world-cave-name">${LOCATION_NAMES[0]}</span></p>
+        <p id="cave-refresh-label" class="cave-refresh-label"></p>
       </div>
       <div id="world-toast" class="world-toast"></div>
       <canvas id="world-canvas" width="800" height="800"></canvas>
@@ -128,6 +135,7 @@ function enterWorld(account, { spectator, energy, energyMax }) {
   const canvas = document.getElementById('world-canvas');
   const toastEl = document.getElementById('world-toast');
   const caveNameEl = document.getElementById('world-cave-name');
+  activeCaveRefresh = mountCaveRefreshCountdown({ labelEl: document.getElementById('cave-refresh-label') });
   activeMine = mountMine({
     canvas, toastEl, account, locationId: 0, spectator,
     // Walkways (see mining.js's LOCATION_EXITS) replace the old "Cave:"
