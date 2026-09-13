@@ -158,33 +158,60 @@ async function reconcileAllLocations(db, sysdata) {
 
 /**
  * Applies one pickaxe strike inside a Firestore transaction.
- * Returns { depleted, oreType, value, strikesRemaining } or null if the
- * node doesn't exist / isn't currently active (already depleted by
- * someone else - normal in multiplayer, not an error).
+ *
+ * Energy is only spent - and only required - on the strike that actually
+ * depletes the node (i.e. mines it out), not on every hit toward it. That
+ * check has to live in the same transaction as the strike itself: if we
+ * checked energy beforehand and deducted it afterward as two separate
+ * steps, a player who hits 0 energy exactly on what would've been the
+ * finishing blow could either get a free ore (checked-then-someone-else's-
+ * strike-lands-first race) or, worse, have the node silently consumed
+ * with no one credited. Doing it all in one transaction means: if this
+ * hit would deplete the node but there's no energy for it, the hit simply
+ * doesn't register at all - strikesRemaining stays exactly where it was,
+ * and the node is still there once the player has rested.
+ *
+ * Returns one of:
+ *   null                              - node doesn't exist / not active (already depleted by someone else)
+ *   { blocked: 'no_worker_row' }      - no workers/{account} doc (shouldn't normally happen - defensive)
+ *   { blocked: 'no_energy' }          - this would be the depleting hit, but energy is 0
+ *   { depleted: false, strikesRemaining }
+ *   { depleted: true, oreType, value, energy } - energy is the balance *after* this strike
  */
 async function strikeNodeTx(db, locationId, nId, account) {
-  const ref = nodesCollection(db, locationId).doc(nId);
+  const nodeRef = nodesCollection(db, locationId).doc(nId);
+  const workerRef = db.collection('workers').doc(account);
 
   return db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    if (!snap.exists) return null;
-    const node = snap.data();
+    const [nodeSnap, workerSnap] = await Promise.all([tx.get(nodeRef), tx.get(workerRef)]);
+    if (!nodeSnap.exists) return null;
+    const node = nodeSnap.data();
     if (node.state !== 'active') return null;
 
     const strikesRemaining = node.strikesRemaining - 1;
+    const wouldDeplete = strikesRemaining <= 0;
 
-    if (strikesRemaining <= 0) {
-      tx.update(ref, {
-        state: 'depleted',
-        strikesRemaining: 0,
-        lastHitBy: account,
-        respawnAtMs: Date.now() + RESPAWN_DELAY_MS
-      });
-      return { depleted: true, oreType: node.oreType, value: ORE_TYPES[node.oreType].value };
+    if (!wouldDeplete) {
+      // An ordinary hit that doesn't finish the node off - free, no
+      // energy or worker-row check needed.
+      tx.update(nodeRef, { strikesRemaining, lastHitBy: account });
+      return { depleted: false, strikesRemaining };
     }
 
-    tx.update(ref, { strikesRemaining, lastHitBy: account });
-    return { depleted: false, strikesRemaining };
+    if (!workerSnap.exists) return { blocked: 'no_worker_row' };
+    const currentEnergy = workerSnap.data().energy || 0;
+    if (currentEnergy <= 0) return { blocked: 'no_energy' };
+
+    const newEnergy = currentEnergy - 1;
+    tx.update(nodeRef, {
+      state: 'depleted',
+      strikesRemaining: 0,
+      lastHitBy: account,
+      respawnAtMs: Date.now() + RESPAWN_DELAY_MS
+    });
+    tx.update(workerRef, { energy: newEnergy });
+
+    return { depleted: true, oreType: node.oreType, value: ORE_TYPES[node.oreType].value, energy: newEnergy };
   });
 }
 

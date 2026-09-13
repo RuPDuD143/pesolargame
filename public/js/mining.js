@@ -25,14 +25,16 @@
 //   same connect() the dropdown used to, via onLocationChange so the UI
 //   can show which cave you're in without polling. Cave 0 additionally
 //   keeps a standalone locked "Cave Exit" walkway on its own wall.
-// - every landed strike now costs 1 energy server-side (see
-//   server/index.js's /throwPickaxe) - onEnergyChange lets the caller
+// - mining a node out now costs 1 energy server-side (see
+//   server/index.js's /throwPickaxe and node-manager.js's strikeNodeTx -
+//   only the strike that actually depletes the node costs anything,
+//   ordinary hits toward it are free) - onEnergyChange lets the caller
 //   keep an energy bar in sync without polling for it.
 //
 // Movement/anti-cheat caveat from before still applies: charX/charY are
 // still client-reported, not server-tracked - unchanged in this slice.
 
-import { db, apiFetch } from './firebase-config.js?v=10';
+import { db, apiFetch } from './firebase-config.js?v=11';
 import {
   collection, onSnapshot, query, orderBy, limit, Timestamp
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
@@ -111,8 +113,9 @@ const LOCATION_EXITS = buildChainExits();
  *   active cave changes (initial mount and every walkway crossing), so the
  *   caller can show which cave you're in without polling.
  * @param {(energy:number)=>void} [opts.onEnergyChange] - fired whenever the
- *   server reports an updated energy value (after a successful strike),
- *   so the caller can keep an energy bar in sync without polling.
+ *   server reports an updated energy value (after a strike that actually
+ *   depleted a node - see mining.js's header note above), so the caller
+ *   can keep an energy bar in sync without polling.
  * @returns {{ setLocation(id:number): void, destroy(): void }}
  */
 export function mountMine({ canvas, toastEl, account, locationId, spectator = false, onLocationChange, onEnergyChange }) {

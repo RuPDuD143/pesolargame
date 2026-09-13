@@ -220,26 +220,19 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
 
     if (!nodeId) return res.json({ struck: false }); // empty-ground throw, animation only - no energy spent
 
-    // Every actual strike attempt costs 1 energy - this was previously
-    // never deducted anywhere, so energy just sat frozen at whatever
-    // getWorkerStatus/wakeWorker last wrote no matter how much mining
-    // happened. Charged only once we know it's landing on a still-active
-    // node (see the `!result` check below) - a miss on an already-mined
-    // node shouldn't cost anything.
-    const workerRef = db.collection('workers').doc(account);
-    const workerSnap = await workerRef.get();
-    if (!workerSnap.exists) return res.status(412).json({ error: 'no_worker_row' });
-    const currentEnergy = workerSnap.data().energy || 0;
-    if (currentEnergy <= 0) return res.status(400).json({ error: 'no_energy' });
-
+    // Energy is checked/spent inside strikeNodeTx itself now, atomically
+    // with the strike - see node-manager.js's comment on why: only the
+    // hit that actually depletes the node (mines it out) costs energy,
+    // ordinary hits toward it are free, and if the finishing hit lands
+    // with 0 energy the strike doesn't register at all rather than
+    // wasting the node.
     const result = await nodeManager.strikeNodeTx(db, locationId, nodeId, account);
-    if (!result) return res.json({ struck: false }); // already depleted by someone else - no energy spent on a miss
-
-    const newEnergy = currentEnergy - 1;
-    await workerRef.update({ energy: FieldValue.increment(-1) });
+    if (!result) return res.json({ struck: false }); // already depleted by someone else
+    if (result.blocked === 'no_worker_row') return res.status(412).json({ error: 'no_worker_row' });
+    if (result.blocked === 'no_energy') return res.status(400).json({ error: 'no_energy' });
 
     if (!result.depleted) {
-      return res.json({ struck: true, depleted: false, strikesRemaining: result.strikesRemaining, energy: newEnergy });
+      return res.json({ struck: true, depleted: false, strikesRemaining: result.strikesRemaining });
     }
 
     // Node depleted on this strike: credit the winner and bump world state.
@@ -269,7 +262,7 @@ app.post('/throwPickaxe', requireAuth, async (req, res) => {
     // respawnAtMs on the node doc, and the always-on respawn sweep
     // (started below) picks it up within about 5 minutes.
 
-    res.json({ struck: true, depleted: true, oreType: result.oreType, value: result.value, energy: newEnergy });
+    res.json({ struck: true, depleted: true, oreType: result.oreType, value: result.value, energy: result.energy });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'internal_error' });
