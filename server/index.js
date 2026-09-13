@@ -58,6 +58,24 @@ const app = express();
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
 app.use(express.json());
 
+// Minimal request/response logging - there was previously NOTHING logging
+// incoming requests at all (no morgan, nothing), so a handler that hung
+// forever was completely invisible from Render's log dashboard: no way to
+// tell "never arrived" from "arrived and is stuck" from "arrived, finished,
+// but the client never saw it" without this. Logs on the way in (so a
+// request that never even reaches here is obviously absent from the logs)
+// and again on 'finish' (so a request that arrives but never gets a
+// response is just as obviously missing its second line, and one that
+// does respond shows exactly how long it took).
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  console.log(`--> ${req.method} ${req.path}`);
+  res.on('finish', () => {
+    console.log(`<-- ${req.method} ${req.path} ${res.statusCode} (${Date.now() - startedAt}ms)`);
+  });
+  next();
+});
+
 // ---------------------------------------------------------------------
 // Auth middleware: verifies a Firebase ID token (the client gets one
 // automatically after signInWithCustomToken - see public/js/wallet.js).
@@ -70,7 +88,9 @@ async function requireAuth(req, res, next) {
     const header = req.headers.authorization || '';
     const idToken = header.startsWith('Bearer ') ? header.slice(7) : null;
     if (!idToken) return res.status(401).json({ error: 'missing_id_token' });
+    console.log('requireAuth: verifying token...');
     const decoded = await auth.verifyIdToken(idToken);
+    console.log('requireAuth: token verified for', decoded.uid);
     req.account = decoded.uid; // uid === WAX account name (see verifyLoginAndMintToken below)
     next();
   } catch (err) {
@@ -205,10 +225,13 @@ app.post('/wakeWorker', requireAuth, async (req, res) => {
 app.post('/startMining', requireAuth, async (req, res) => {
   try {
     const { account, locationId, nodeId, charX, charY } = req.body || {};
+    console.log('startMining: request body parsed', { account, locationId, nodeId });
     if (!requireClaimedAccount(req, res, account)) return;
     if (!(locationId in LOCATIONS)) return res.status(400).json({ error: 'bad_location' });
 
+    console.log('startMining: fetching node doc...');
     const nodeSnap = await nodeManager.nodesCollection(db, locationId).doc(nodeId).get();
+    console.log('startMining: node doc fetched', { exists: nodeSnap.exists, state: nodeSnap.exists ? nodeSnap.data().state : null });
     if (!nodeSnap.exists || nodeSnap.data().state !== 'active') {
       return res.status(400).json({ error: 'node_not_active' });
     }
@@ -219,16 +242,21 @@ app.post('/startMining', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'out_of_range' });
     }
 
+    console.log('startMining: starting session...');
     await miningSession.startSession(db, account, locationId, nodeId);
+    console.log('startMining: session started');
     // Public broadcast so other clients can render your orbit/swing too -
     // see mining-session.js's file header. Best-effort: if this write
     // somehow fails, the session itself (already started above) still
     // works fine for you - you just won't be visible to others.
     try {
+      console.log('startMining: writing broadcast...');
       await miningSession.startBroadcast(db, locationId, account, nodeId, charX, charY);
+      console.log('startMining: broadcast written');
     } catch (err) {
       console.error('startBroadcast failed (non-fatal):', err);
     }
+    console.log('startMining: sending response');
     res.json({ started: true });
   } catch (err) {
     console.error(err);
