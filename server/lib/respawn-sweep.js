@@ -9,17 +9,25 @@
 //    mined come back reasonably soon, instead of making you wait for the
 //    full sweep below.
 //
-//    Before rolling any of them, it snapshots computeCommittedValueByLocation()
-//    (how much value every location's currently-active nodes already
-//    hold) once for the whole tick. A location's nodeMax only depends on
-//    what STRICTLY EARLIER locations have committed (see node-manager.js's
-//    nodeMaxForLocation) - never on its own current total - so every due
-//    node in a given location this tick can independently use that same
-//    location's nodeMax, with no need to thread a shared mutable budget
-//    through them one at a time. (An earlier version of this file tried
-//    to track a single combined budget across the whole mine regardless
-//    of location, which silently dropped the location-priority ordering
-//    entirely - this is the corrected version.)
+//    Before rolling any due node, it checks WHICH locations actually have
+//    anything due first (cheap), and only then - if at least one does -
+//    pays for computeCommittedValueByLocation() (how much value every
+//    location's currently-active nodes already hold), once for the whole
+//    tick. A location's nodeMax only depends on what STRICTLY EARLIER
+//    locations have committed (see node-manager.js's nodeMaxForLocation)
+//    - never on its own current total - so every due node in a given
+//    location this tick can independently use that same location's
+//    nodeMax, with no need to thread a shared mutable budget through them
+//    one at a time. (An earlier version of this file tried to track a
+//    single combined budget across the whole mine regardless of
+//    location, which silently dropped the location-priority ordering
+//    entirely - this is the corrected version. A version after that ran
+//    computeCommittedValueByLocation() unconditionally on every tick,
+//    which - at up to 100 active nodes x 6 locations, every 5 minutes -
+//    was reading up to ~172,800 docs/day on its own even with nobody
+//    playing, blowing straight through Firestore's 50K-reads/day free
+//    quota. Gating it behind "is anything actually due" is what fixed
+//    that.)
 //
 // 2. runSweepIfDue() - the actual "hourly cave refresh": pulls the live
 //    `resources` value from the on-chain contract table (so e.g. voting
@@ -64,6 +72,39 @@ function startRespawnSweep(db) {
     const now = Date.now();
 
     try {
+      const sortedLocationIds = Object.keys(LOCATIONS).map(Number).sort((a, b) => a - b);
+
+      // Cheap pass first: find out which locations actually have anything
+      // due to respawn right now, BEFORE paying for
+      // computeCommittedValueByLocation()'s full active-node scan across
+      // every location. Most 5-minute ticks - especially with nobody
+      // actively mining right that moment - have nothing due anywhere at
+      // all, and that scan alone was costing up to ~600 document reads a
+      // tick (6 locations x up to 100 active nodes each), unconditionally,
+      // every 5 minutes = up to ~172,800 reads/day on its own. THAT'S what
+      // was actually burning through Firestore's 50K reads/day free quota
+      // and tripping the 429s - not the respawns themselves, which are
+      // comparatively tiny. A due-check query against an empty result set
+      // is billed as a single read regardless, so this pass costs at most
+      // ~6 reads/tick instead.
+      const dueSnaps = {};
+      let anyDue = false;
+      for (const locationId of sortedLocationIds) {
+        try {
+          const snap = await nodeManager
+            .nodesCollection(db, locationId)
+            .where('state', '==', 'depleted')
+            .where('respawnAtMs', '<=', now)
+            .get();
+          dueSnaps[locationId] = snap;
+          if (!snap.empty) anyDue = true;
+        } catch (err) {
+          console.error(`respawn sweep due-check failed for location ${locationId}:`, err.message);
+        }
+      }
+
+      if (!anyDue) return; // nothing to respawn this tick - skip the expensive part entirely
+
       const sysSnap = await db.collection('sysdata').doc('main').get();
       if (!sysSnap.exists) return;
       const sysdata = sysSnap.data();
@@ -74,7 +115,6 @@ function startRespawnSweep(db) {
       // already. Sorted ascending so we can build up "everything strictly
       // earlier than this location" as we go, left to right.
       const committedByLocation = await nodeManager.computeCommittedValueByLocation(db);
-      const sortedLocationIds = Object.keys(LOCATIONS).map(Number).sort((a, b) => a - b);
 
       let committedByLower = 0;
       for (const locationId of sortedLocationIds) {
@@ -82,21 +122,16 @@ function startRespawnSweep(db) {
         // once from everything strictly before it - not affected by how
         // many of its own nodes happen to respawn in this same tick.
         const nodeMax = nodeManager.nodeMaxForLocation(rawRemaining, committedByLower);
+        const snap = dueSnaps[locationId];
 
-        try {
-          const snap = await nodeManager
-            .nodesCollection(db, locationId)
-            .where('state', '==', 'depleted')
-            .where('respawnAtMs', '<=', now)
-            .get();
-
-          if (!snap.empty) {
+        if (snap && !snap.empty) {
+          try {
             await Promise.all(
               snap.docs.map((doc) => nodeManager.respawnNode(db, locationId, doc.id, nodeMax))
             );
+          } catch (err) {
+            console.error(`respawn sweep failed for location ${locationId}:`, err.message);
           }
-        } catch (err) {
-          console.error(`respawn sweep failed for location ${locationId}:`, err.message);
         }
 
         committedByLower += committedByLocation[locationId] || 0;
