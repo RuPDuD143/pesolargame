@@ -587,12 +587,17 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   }
 
   async function startMining(node) {
+    console.debug('[mining] POST /startMining', {
+      account, locationId: currentLocationId, nodeId: node.id, charX: player.x, charY: player.y,
+      hasCurrentUser: !!auth.currentUser
+    });
     try {
       await apiFetch('/startMining', {
         method: 'POST',
         authRequired: true,
         body: { account, locationId: currentLocationId, nodeId: node.id, charX: player.x, charY: player.y }
       });
+      console.debug('[mining] /startMining succeeded - swing should now be visible', { nodeId: node.id });
       miningState = {
         nodeId: node.id,
         localStrikesRemaining: node.strikesRemaining,
@@ -603,6 +608,13 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         finalizing: false
       };
     } catch (err) {
+      // Previously only err.message reached the toast (out_of_range vs a
+      // generic "can't mine that" catch-all) and the actual error object
+      // was discarded entirely - so an auth failure, a CORS/network error,
+      // or a 500 from the server all looked visually identical and left
+      // nothing in the console to tell them apart. Logging the raw error
+      // here is what turns "nothing happens" into an actual diagnosis.
+      console.error('[mining] /startMining failed:', err);
       toast(err.message === 'out_of_range' ? 'Too far to mine - get closer.' : "Can't mine that right now.");
     }
   }
@@ -629,6 +641,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         authRequired: true,
         body: { account, locationId: currentLocationId, nodeId, hitCount: pendingHits }
       });
+      console.debug('[mining] /mineNode result', result);
       if (result.depleted) {
         toast(`+1 ${result.oreType} (${result.value} coin value)`);
       } else if (result.alreadyDepleted) {
@@ -643,7 +656,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         // the snipe-detector and a manual Esc landing back to back) - the
         // first call already resolved things server-side, nothing new to
         // report from the second.
-        console.error('mineNode failed:', err);
+        console.error('[mining] /mineNode failed:', err);
         toast("Mining didn't register - try again.");
       }
     } finally {
@@ -659,6 +672,10 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         // Already mining - a click during an active session cancels it.
         // Progress made so far still gets sent to the server (finalizeMining
         // only skips the network call if literally nothing landed yet).
+        console.debug('[mining] click while already mining - cancelling session', {
+          nodeId: miningState.nodeId, pendingHits: miningState.pendingHits,
+          finalizing: miningState.finalizing
+        });
         finalizeMining();
         return;
       }
@@ -710,10 +727,15 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
       }
 
       if (distanceToNode(target) > MINING_RANGE) {
+        console.debug('[mining] target found but out of range', {
+          nodeId: target.id, distance: distanceToNode(target), miningRange: MINING_RANGE,
+          playerX: player.x, playerY: player.y, nodeX: target.x, nodeY: target.y
+        });
         toast('Too far to mine - get closer.');
         return;
       }
 
+      console.debug('[mining] target in range, starting mining session', { nodeId: target.id });
       startMining(target);
     } catch (err) {
       // Belt-and-suspenders: nothing above should throw synchronously, but
