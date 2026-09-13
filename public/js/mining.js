@@ -120,7 +120,7 @@
 //   falls back to the existing "Validating..." label at that point
 //   rather than guessing further.
 
-import { db, rtdb, apiFetch } from './firebase-config.js?v=14';
+import { db, rtdb, apiFetch, auth } from './firebase-config.js?v=14';
 import { collection, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 import {
   ref, push, onValue, set, remove, onDisconnect, serverTimestamp
