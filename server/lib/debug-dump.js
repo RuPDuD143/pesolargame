@@ -34,28 +34,44 @@ function serializeValue(value) {
   return value;
 }
 
-/** Dumps one collection (and everything under it) into { docId: {...fields, _subcollections?} }. */
+/**
+ * Dumps one collection (and everything under it) into
+ * { docId: {...fields, _subcollections?} }.
+ *
+ * Uses listDocuments() rather than get(). get() runs a query, and
+ * Firestore queries only return documents that actually have field
+ * data - a document that exists solely as the parent of a subcollection
+ * (e.g. locations/{id} here, which nothing ever .set()s directly - only
+ * locations/{id}/nodes/{n} gets written to) has no fields of its own and
+ * is silently excluded from a get() on its parent collection, even
+ * though its subcollection is very much real. listDocuments() instead
+ * lists every document reference that exists in any sense (own data,
+ * subcollections, or both), which is what a "dump everything" tool
+ * actually needs.
+ */
 async function dumpCollection(collectionRef) {
-  const snap = await collectionRef.get();
+  const docRefs = await collectionRef.listDocuments();
   const out = {};
 
-  for (const doc of snap.docs) {
-    const fields = serializeValue(doc.data());
-    const subcollections = await doc.ref.listCollections();
+  for (const docRef of docRefs) {
+    const [snap, subcollections] = await Promise.all([docRef.get(), docRef.listCollections()]);
+    const fields = snap.exists ? serializeValue(snap.data()) : {};
 
     if (subcollections.length === 0) {
-      out[doc.id] = fields;
+      out[docRef.id] = fields;
       continue;
     }
 
     // A doc can have BOTH its own fields and subcollections at once
     // (e.g. workers/{account} has energy/coins fields AND an inventory/
-    // subcollection) - keep both rather than picking one.
+    // subcollection), or ONLY subcollections and no fields at all (e.g.
+    // locations/{id} - see the comment above) - keep whatever's there
+    // rather than assuming one or the other.
     const nested = {};
     for (const sub of subcollections) {
       nested[sub.id] = await dumpCollection(sub);
     }
-    out[doc.id] = { ...fields, _subcollections: nested };
+    out[docRef.id] = { ...fields, _subcollections: nested };
   }
 
   return out;
