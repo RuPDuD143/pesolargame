@@ -9,17 +9,17 @@
 //    mined come back reasonably soon, instead of making you wait for the
 //    full sweep below.
 //
-//    Before rolling any of them, it tallies up computeCommittedValue()
-//    (the value already sitting in every other active node in the mine)
-//    and spends a single shared budget down across all of this tick's due
-//    nodes in sequence - the same shared-budget approach reconcileAllLocations
-//    uses below, just scoped to "only the nodes that are due right now"
-//    instead of "every node slot in the game". Previously each due node
-//    checked its own value against computeNodeMax(sysdata) in isolation,
-//    with no memory of every other node also passing that same check -
-//    which is how e.g. Aurum Depths could end up holding 100 separate
-//    25-value gold nodes even though the whole mine's resources only
-//    supported ~34 value worth of ore at once.
+//    Before rolling any of them, it snapshots computeCommittedValueByLocation()
+//    (how much value every location's currently-active nodes already
+//    hold) once for the whole tick. A location's nodeMax only depends on
+//    what STRICTLY EARLIER locations have committed (see node-manager.js's
+//    nodeMaxForLocation) - never on its own current total - so every due
+//    node in a given location this tick can independently use that same
+//    location's nodeMax, with no need to thread a shared mutable budget
+//    through them one at a time. (An earlier version of this file tried
+//    to track a single combined budget across the whole mine regardless
+//    of location, which silently dropped the location-priority ordering
+//    entirely - this is the corrected version.)
 //
 // 2. runSweepIfDue() - the actual "hourly cave refresh": pulls the live
 //    `resources` value from the on-chain contract table (so e.g. voting
@@ -28,7 +28,8 @@
 //    forever), writes it into sysdata/main, then reconciles every
 //    location against it (see node-manager.reconcileAllLocations - tops
 //    locations up to NODE_SLOTS_PER_LOCATION, respawns anything due, and
-//    rerolls any active node that's grown too valuable for the budget).
+//    rerolls any active node that's grown too valuable for its location's
+//    budget).
 //
 //    This does NOT run unconditionally - it first checks sysdata/main's
 //    `lastSweep` timestamp and does nothing if less than SWEEP_HOURS has
@@ -67,16 +68,21 @@ function startRespawnSweep(db) {
       if (!sysSnap.exists) return;
       const sysdata = sysSnap.data();
 
-      // Everything currently active anywhere in the mine, *before* this
-      // tick touches anything - due nodes are still 'depleted' right now,
-      // so they're correctly excluded already and won't double-count
-      // themselves. This is what turns "does this one node fit under the
-      // mine's raw ceiling" into "does this one node fit in what's
-      // actually left" - see computeCommittedValue's doc comment.
-      const committedValue = await nodeManager.computeCommittedValue(db);
-      const budget = { remaining: nodeManager.computeNodeMax(sysdata) - committedValue };
+      const rawRemaining = nodeManager.computeRawRemaining(sysdata);
+      // Snapshot once per tick, before anything below touches a doc - due
+      // nodes are still 'depleted' right now so they're correctly excluded
+      // already. Sorted ascending so we can build up "everything strictly
+      // earlier than this location" as we go, left to right.
+      const committedByLocation = await nodeManager.computeCommittedValueByLocation(db);
+      const sortedLocationIds = Object.keys(LOCATIONS).map(Number).sort((a, b) => a - b);
 
-      for (const locationId of Object.keys(LOCATIONS)) {
+      let committedByLower = 0;
+      for (const locationId of sortedLocationIds) {
+        // This location's nodeMax is fixed for the whole tick, computed
+        // once from everything strictly before it - not affected by how
+        // many of its own nodes happen to respawn in this same tick.
+        const nodeMax = nodeManager.nodeMaxForLocation(rawRemaining, committedByLower);
+
         try {
           const snap = await nodeManager
             .nodesCollection(db, locationId)
@@ -84,20 +90,16 @@ function startRespawnSweep(db) {
             .where('respawnAtMs', '<=', now)
             .get();
 
-          if (snap.empty) continue;
-
-          // Sequential on purpose: every respawn spends from the same
-          // shared `budget`, so node N sees whatever node N-1 just
-          // reserved. Running these in parallel (the old Promise.all)
-          // would let every due node check against the same starting
-          // `remaining` and race straight past the real ceiling again -
-          // that race is the whole bug this rewrite exists to close.
-          for (const doc of snap.docs) {
-            await nodeManager.respawnNode(db, locationId, doc.id, budget);
+          if (!snap.empty) {
+            await Promise.all(
+              snap.docs.map((doc) => nodeManager.respawnNode(db, locationId, doc.id, nodeMax))
+            );
           }
         } catch (err) {
           console.error(`respawn sweep failed for location ${locationId}:`, err.message);
         }
+
+        committedByLower += committedByLocation[locationId] || 0;
       }
     } catch (err) {
       console.error('respawn sweep failed:', err.message);

@@ -31,23 +31,49 @@ const DEMO_RESOURCES = 1000000;
 // ---------------------------------------------------------------------
 
 /**
- * floor((resources - mined_resources) / 100), per spec - how much ore
- * *value* the whole mine can currently afford spawning, in total.
+ * The mine's raw resource pool - (resources - minedResources), NOT
+ * divided by 100. See nodeMaxForLocation for how a location's actual
+ * per-node ceiling is derived from this.
  *
  * Both fields are coerced with a `|| 0` fallback on purpose: sysdata/main
  * is created by hand in the Firestore console (see server/index.js's
  * "create it first... with { resources: <int>, minedResources: 0 }"
  * message), so a doc that only has `resources` set - no `minedResources`
- * yet - used to compute `resources - undefined` = NaN. Every comparison
- * against NaN is false, so the `value > nodeMax` downgrade/reject check
- * in rollOreType() never triggered - the *unfiltered* weighted roll's
- * tier spawned regardless of how little `resources` actually was, which
- * is how e.g. diamond could show up with resources pinned to 5.
+ * yet - used to compute `resources - undefined` = NaN, silently
+ * disabling every downstream affordability check.
  */
-function computeNodeMax(sysdata) {
+function computeRawRemaining(sysdata) {
   const resources = DEMO_MODE ? DEMO_RESOURCES : (Number(sysdata.resources) || 0);
   const minedResources = Number(sysdata.minedResources) || 0;
-  return Math.floor((resources - minedResources) / 100);
+  return Math.max(0, resources - minedResources);
+}
+
+/**
+ * A location's nodeMax is a single ceiling - the most *value* any one of
+ * its node slots may be worth - shared uniformly by every slot in that
+ * location. It is NOT reduced node-by-node as that location's own nodes
+ * get rolled; it only depends on how much of the mine's total resource
+ * pool has already been spoken for by EARLIER (lower-id) locations.
+ *
+ * Worked example (this is the actual intended behavior, not an
+ * approximation of it): resources=3404, minedResources=59 ->
+ * rawRemaining=3345. Location 0's nodeMax = floor(3345/100) = 33
+ * (permits anything up to gold's value of 25). Say location 0 ends up
+ * rolling 65 stone + 25 iron + 10 gold = 440 total value - that 440 is
+ * subtracted ONCE, after all of location 0's 100 nodes are decided, not
+ * per-node while rolling them. Location 1's nodeMax is then
+ * floor((3345-440)/100) = floor(2905/100) = 29 - still permits gold. If
+ * location 1 commits 700, location 2's nodeMax becomes
+ * floor((2905-700)/100) = 22, which is below location 2's baseline ore
+ * value, so location 2 (and, since nothing is ever spent there, every
+ * location after it) spawns no active nodes at all until the pool grows.
+ *
+ * `committedByLowerLocations` is the sum of committed value across every
+ * location with a strictly smaller id than the one being computed for -
+ * see computeCommittedValueByLocation.
+ */
+function nodeMaxForLocation(rawRemaining, committedByLowerLocations) {
+  return Math.floor(Math.max(0, rawRemaining - committedByLowerLocations) / 100);
 }
 
 /** Weighted-random tier pick, then downgrade-to-baseline (or no spawn) if too expensive. */
@@ -91,49 +117,67 @@ function buildActiveNodeData(locationId, point, nodeMax) {
 }
 
 /**
- * Same as buildActiveNodeData, but spends from a shared, mutable budget
- * across many calls instead of recomputing an independent ceiling each
- * time. `budget` is a plain `{ remaining: number }` object, mutated in
- * place - this is what lets reconcileAllLocations hand location 0 first
- * claim on the mine's total value headroom, and only let higher-numbered
- * locations spawn ore with whatever's left over, in priority order.
+ * Sums the *value* of every currently-active node, broken down per
+ * location - i.e. how much of the mine's total resource pool is already
+ * spoken for by nodes nobody has mined out yet. nodeMaxForLocation needs
+ * the running total of every EARLIER location to compute a given
+ * location's ceiling; this is what supplies that (used by the fast
+ * per-node respawn sweep - reconcileAllLocations tracks its own running
+ * total as it goes, in one pass, since it visits every location anyway).
+ *
+ * Deliberately recomputed from the node docs themselves (ground truth)
+ * rather than maintained as a running counter on sysdata/main - a counter
+ * would need every single write path that flips a node active/depleted to
+ * remember to keep it in sync (including hand-edits, future code, etc.),
+ * and would silently drift if any of them ever forgot. Six locations of at
+ * most 100 nodes each is cheap enough to just re-read whenever it's needed.
  */
-function buildActiveNodeDataFromBudget(locationId, point, budget) {
-  const node = buildActiveNodeData(locationId, point, budget.remaining);
-  if (node.state === 'active') budget.remaining -= ORE_TYPES[node.oreType].value;
-  return node;
+async function computeCommittedValueByLocation(db) {
+  const locationIds = Object.keys(LOCATIONS).map(Number).sort((a, b) => a - b);
+  const committed = {};
+
+  for (const locationId of locationIds) {
+    const snap = await nodesCollection(db, locationId).where('state', '==', 'active').get();
+    let total = 0;
+    snap.forEach((doc) => { total += ORE_TYPES[doc.data().oreType].value; });
+    committed[locationId] = total;
+  }
+
+  return committed;
 }
 
 /**
  * Ensures every location has exactly NODE_SLOTS_PER_LOCATION node docs
  * (creating whichever are missing), respawns any depleted node whose
  * respawnAtMs has passed, AND catches any currently-active node that's
- * worth more than the mine can currently afford (e.g. a diamond node left
- * over from before sysdata/main.resources was lowered, or from the NaN
- * budget bug) and rerolls it - previously an over-budget node just sat
- * there indefinitely once spawned, since only depleted nodes ever got
- * re-evaluated.
+ * worth more than its location can currently afford (e.g. a diamond node
+ * left over from before sysdata/main.resources was lowered) and rerolls
+ * it - previously an over-budget node just sat there indefinitely once
+ * spawned, since only depleted nodes ever got re-evaluated.
  *
- * Spends ONE shared budget across all locations in ascending id order
- * (location 0 first, then 1, 2, ... up through the highest id), so low
- * locations get first claim on the mine's value headroom and higher ones
- * only get ore if there's some left over. This is on top of, not a
- * replacement for, the per-node ceiling already enforced by
- * buildActiveNodeData/rollOreType.
+ * Processes locations in ascending id order. Each location's nodeMax is
+ * fixed for that location's *entire* batch of slots (see
+ * nodeMaxForLocation's doc comment for why, and a worked example) - low-id
+ * locations get first claim on the mine's total resource pool, and only
+ * the leftover after ALL of a location's actual rolled value is tallied
+ * flows into the next location's ceiling.
  */
 async function reconcileAllLocations(db, sysdata) {
-  const budget = { remaining: computeNodeMax(sysdata) };
+  const rawRemaining = computeRawRemaining(sysdata);
   const locationIds = Object.keys(LOCATIONS).map(Number).sort((a, b) => a - b);
   const now = Date.now();
+  let committedSoFar = 0; // running total of every earlier location's final committed value
 
   for (const locationId of locationIds) {
     const config = LOCATIONS[locationId];
+    const nodeMax = nodeMaxForLocation(rawRemaining, committedSoFar); // fixed for this location's whole batch
     const col = nodesCollection(db, locationId);
     const existingSnap = await col.get();
     const existingById = new Map(existingSnap.docs.map((d) => [d.id, d.data()]));
 
     const batch = db.batch();
     let writes = 0;
+    let locationCommitted = 0;
 
     config.spawnPoints.forEach((point, index) => {
       const id = nodeId(locationId, index);
@@ -142,17 +186,20 @@ async function reconcileAllLocations(db, sysdata) {
       const dueToRespawn = current && current.state === 'depleted'
         && current.respawnAtMs != null && current.respawnAtMs <= now;
       const overBudget = current && current.state === 'active'
-        && ORE_TYPES[current.oreType].value > budget.remaining;
+        && ORE_TYPES[current.oreType].value > nodeMax;
 
       if (!current || dueToRespawn || overBudget) {
-        batch.set(col.doc(id), buildActiveNodeDataFromBudget(locationId, point, budget));
+        const node = buildActiveNodeData(locationId, point, nodeMax);
+        batch.set(col.doc(id), node);
         writes++;
+        if (node.state === 'active') locationCommitted += ORE_TYPES[node.oreType].value;
       } else if (current.state === 'active') {
-        budget.remaining -= ORE_TYPES[current.oreType].value; // still reserved, just left as-is
+        locationCommitted += ORE_TYPES[current.oreType].value; // kept as-is, still counts against the pool
       }
     });
 
     if (writes > 0) await batch.commit();
+    committedSoFar += locationCommitted;
   }
 }
 
@@ -227,67 +274,28 @@ async function strikeNodeTx(db, locationId, nId, account, hitCount = 1) {
 }
 
 /**
- * Sums the *value* of every currently-active node across every location -
- * i.e. how much of the mine's total nodeMax budget is already spoken for
- * right now, by nodes nobody has mined out yet.
- *
- * This exists so the fast per-node respawn sweep (see respawnNode below)
- * can know the *true* remaining headroom before rolling a node, instead
- * of checking a single node's value against the mine's raw, un-decremented
- * ceiling - which was the bug: computeNodeMax() alone answers "what's the
- * absolute most the whole mine could ever hold", not "what's left after
- * everything already spawned". Checking a single 25-value gold node against
- * a raw ceiling of 34 says "sure, that fits" every single time, with no
- * memory of the 99 other gold nodes that already passed the exact same
- * check - that's how a location can end up holding far more total value
- * than sysdata/main.resources should allow.
- *
- * Deliberately recomputed from the node docs themselves (ground truth)
- * rather than maintained as a running counter on sysdata/main - a counter
- * would need every single write path that flips a node active/depleted to
- * remember to keep it in sync (including hand-edits, future code, etc.),
- * and would silently drift if any of them ever forgot. Six locations of at
- * most 100 nodes each is cheap enough to just re-read every 5 minutes.
- */
-async function computeCommittedValue(db) {
-  const locationIds = Object.keys(LOCATIONS);
-  let total = 0;
-
-  for (const locationId of locationIds) {
-    const snap = await nodesCollection(db, locationId).where('state', '==', 'active').get();
-    snap.forEach((doc) => {
-      const { oreType } = doc.data();
-      total += ORE_TYPES[oreType].value;
-    });
-  }
-
-  return total;
-}
-
-/**
  * Called by the fast per-node respawn sweep once respawnAtMs has passed.
- *
- * Takes a shared `budget` (same `{ remaining: number }` shape as
- * buildActiveNodeDataFromBudget/reconcileAllLocations) rather than raw
- * sysdata, and spends from it - the caller is responsible for seeding
- * `budget.remaining` with computeNodeMax(sysdata) minus whatever
- * computeCommittedValue() already reports as spoken-for, and for calling
- * this once per due node *sequentially* (not in parallel) so each node
- * sees what the previous one just reserved. See respawn-sweep.js.
+ * Takes a pre-computed `nodeMax` directly (see respawn-sweep.js), not raw
+ * sysdata - the right ceiling for a node depends on what every strictly
+ * earlier location has already committed, not just computeRawRemaining()
+ * in isolation, and computing that per-location breakdown is the caller's
+ * job (computeCommittedValueByLocation) since it only needs to happen
+ * once per sweep tick, not once per due node.
  */
-async function respawnNode(db, locationId, nId, budget) {
+async function respawnNode(db, locationId, nId, nodeMax) {
   const config = LOCATIONS[locationId];
   const pointIndex = Number(nId.split('-pt')[1]);
   const point = config.spawnPoints[pointIndex];
   const ref = nodesCollection(db, locationId).doc(nId);
-  await ref.set(buildActiveNodeDataFromBudget(locationId, point, budget));
+  await ref.set(buildActiveNodeData(locationId, point, nodeMax));
 }
 
 module.exports = {
   nodeId,
   nodesCollection,
-  computeNodeMax,
-  computeCommittedValue,
+  computeRawRemaining,
+  nodeMaxForLocation,
+  computeCommittedValueByLocation,
   rollOreType,
   reconcileAllLocations,
   strikeNodeTx,
