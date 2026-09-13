@@ -48,6 +48,17 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Public counterpart to the above: "this account is currently orbiting
+    // this node" (plus their frozen charX/charY and a validating flag),
+    // written by the server on /startMining and cleared on /mineNode - see
+    // mining-session.js. Readable by anyone so other players' clients can
+    // render your swing (and "Validating..." while your finishing batch is
+    // in flight) without needing a full player-position sync.
+    match /locations/{locationId}/miningActivity/{account} {
+      allow read: if true;
+      allow write: if false; // server only
+    }
+
     // Short-lived nonces used for the WAX login proof. Not client-readable
     // (the client already knows its own nonce from the callable response)
     // and never client-writable.

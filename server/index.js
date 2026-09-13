@@ -219,6 +219,15 @@ app.post('/startMining', requireAuth, async (req, res) => {
     }
 
     await miningSession.startSession(db, account, locationId, nodeId);
+    // Public broadcast so other clients can render your orbit/swing too -
+    // see mining-session.js's file header. Best-effort: if this write
+    // somehow fails, the session itself (already started above) still
+    // works fine for you - you just won't be visible to others.
+    try {
+      await miningSession.startBroadcast(db, locationId, account, nodeId, charX, charY);
+    } catch (err) {
+      console.error('startBroadcast failed (non-fatal):', err);
+    }
     res.json({ started: true });
   } catch (err) {
     console.error(err);
@@ -237,52 +246,76 @@ app.post('/mineNode', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'no_active_session' });
     }
 
-    const claimedHits = Math.max(0, Number(hitCount) || 0);
-    const appliedHits = Math.min(claimedHits, miningSession.maxPlausibleHits(session));
-    if (appliedHits <= 0) return res.json({ struck: false });
+    // From here on the session is genuinely ending (whatever the outcome),
+    // so flip the public broadcast to "Validating..." for however long this
+    // takes to resolve, and unconditionally clear it once we're done -
+    // every return path below goes through the `finally` further down.
+    await miningSession.markBroadcastValidating(db, locationId, account);
 
-    // Energy is checked/spent inside strikeNodeTx itself, atomically with
-    // the strike - see that function's comment on why: only a batch that
-    // actually depletes the node (mines it out) costs energy, and if the
-    // finishing batch lands with 0 energy it doesn't register at all
-    // rather than wasting the node.
-    const result = await nodeManager.strikeNodeTx(db, locationId, nodeId, account, appliedHits);
-    if (!result) return res.json({ struck: false }); // already depleted by someone else
-    if (result.blocked === 'no_worker_row') return res.status(412).json({ error: 'no_worker_row' });
-    if (result.blocked === 'no_energy') return res.status(400).json({ error: 'no_energy' });
+    try {
+      const claimedHits = Math.max(0, Number(hitCount) || 0);
+      const appliedHits = Math.min(claimedHits, miningSession.maxPlausibleHits(session));
+      if (appliedHits <= 0) return res.json({ struck: false });
 
-    if (!result.depleted) {
-      return res.json({ struck: true, depleted: false, strikesRemaining: result.strikesRemaining });
+      // Energy is checked/spent inside strikeNodeTx itself, atomically with
+      // the strike - see that function's comment on why: only a batch that
+      // actually depletes the node (mines it out) costs energy, and if the
+      // finishing batch lands with 0 energy it doesn't register at all
+      // rather than wasting the node.
+      const result = await nodeManager.strikeNodeTx(db, locationId, nodeId, account, appliedHits);
+      if (!result) return res.json({ struck: false }); // node doc missing entirely - shouldn't normally happen
+      if (result.blocked === 'already_depleted') {
+        // Someone else's session on the same node finished first - tell
+        // the loser who won instead of leaving them guessing why nothing
+        // happened.
+        return res.json({ struck: false, alreadyDepleted: true, wonBy: result.wonBy });
+      }
+      if (result.blocked === 'no_worker_row') return res.status(412).json({ error: 'no_worker_row' });
+      if (result.blocked === 'no_energy') return res.status(400).json({ error: 'no_energy' });
+
+      if (!result.depleted) {
+        return res.json({ struck: true, depleted: false, strikesRemaining: result.strikesRemaining });
+      }
+
+      // Node depleted on this batch: credit the winner and bump world state.
+      await db.runTransaction(async (tx) => {
+        const sysdataRef = db.collection('sysdata').doc('main');
+        const invRef = db.collection('workers').doc(account).collection('inventory').doc(result.oreType);
+
+        // Firestore transactions require ALL reads before ANY writes -
+        // both gets have to happen first, then both writes below.
+        const [sysSnap, invSnap] = await Promise.all([tx.get(sysdataRef), tx.get(invRef)]);
+
+        tx.update(sysdataRef, {
+          minedResources: (sysSnap.data().minedResources || 0) + result.value,
+          lastUpdated: FieldValue.serverTimestamp()
+        });
+
+        const currentAmount = invSnap.exists ? invSnap.data().amount : 0;
+        tx.set(invRef, {
+          assetId: ORE_ASSET_IDS[result.oreType],
+          itemName: result.oreType,
+          classification: 'ores',
+          amount: currentAmount + 1
+        });
+      });
+
+      // No Cloud Tasks call needed here: strikeNodeTx already stamped
+      // respawnAtMs on the node doc, and the always-on respawn sweep
+      // (started below) picks it up within about 5 minutes.
+
+      return res.json({ struck: true, depleted: true, oreType: result.oreType, value: result.value, energy: result.energy });
+    } finally {
+      // Whatever happened above - depleted, contested, out of energy, or
+      // an outright error below - the session is over, so stop showing
+      // this account as actively mining. Best-effort: a failure here
+      // shouldn't turn a successful mine into a 500 for the player.
+      try {
+        await miningSession.clearBroadcast(db, locationId, account);
+      } catch (err) {
+        console.error('clearBroadcast failed (non-fatal):', err);
+      }
     }
-
-    // Node depleted on this batch: credit the winner and bump world state.
-    await db.runTransaction(async (tx) => {
-      const sysdataRef = db.collection('sysdata').doc('main');
-      const invRef = db.collection('workers').doc(account).collection('inventory').doc(result.oreType);
-
-      // Firestore transactions require ALL reads before ANY writes -
-      // both gets have to happen first, then both writes below.
-      const [sysSnap, invSnap] = await Promise.all([tx.get(sysdataRef), tx.get(invRef)]);
-
-      tx.update(sysdataRef, {
-        minedResources: (sysSnap.data().minedResources || 0) + result.value,
-        lastUpdated: FieldValue.serverTimestamp()
-      });
-
-      const currentAmount = invSnap.exists ? invSnap.data().amount : 0;
-      tx.set(invRef, {
-        assetId: ORE_ASSET_IDS[result.oreType],
-        itemName: result.oreType,
-        classification: 'ores',
-        amount: currentAmount + 1
-      });
-    });
-
-    // No Cloud Tasks call needed here: strikeNodeTx already stamped
-    // respawnAtMs on the node doc, and the always-on respawn sweep
-    // (started below) picks it up within about 5 minutes.
-
-    res.json({ struck: true, depleted: true, oreType: result.oreType, value: result.value, energy: result.energy });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'internal_error' });

@@ -178,11 +178,12 @@ async function reconcileAllLocations(db, sysdata) {
  * reported hit count can't be trusted outright.
  *
  * Returns one of:
- *   null                              - node doesn't exist / not active (already depleted by someone else)
- *   { blocked: 'no_worker_row' }      - no workers/{account} doc (shouldn't normally happen - defensive)
- *   { blocked: 'no_energy' }          - this batch would deplete the node, but energy is 0
+ *   null                                        - node doc doesn't exist at all (shouldn't normally happen)
+ *   { blocked: 'already_depleted', wonBy }       - node exists but someone else's batch already mined it out first (wonBy is that account, from the node's lastHitBy - may be null if somehow unset)
+ *   { blocked: 'no_worker_row' }                 - no workers/{account} doc (shouldn't normally happen - defensive)
+ *   { blocked: 'no_energy' }                     - this batch would deplete the node, but energy is 0
  *   { depleted: false, strikesRemaining }
- *   { depleted: true, oreType, value, energy } - energy is the balance *after* this batch
+ *   { depleted: true, oreType, value, energy }   - energy is the balance *after* this batch
  */
 async function strikeNodeTx(db, locationId, nId, account, hitCount = 1) {
   const nodeRef = nodesCollection(db, locationId).doc(nId);
@@ -192,7 +193,11 @@ async function strikeNodeTx(db, locationId, nId, account, hitCount = 1) {
     const [nodeSnap, workerSnap] = await Promise.all([tx.get(nodeRef), tx.get(workerRef)]);
     if (!nodeSnap.exists) return null;
     const node = nodeSnap.data();
-    if (node.state !== 'active') return null;
+    // Someone else's batch (very likely a concurrent miner on the same
+    // node) already finished it off before this one landed - surface who,
+    // so the loser's client can show a "beat you to it" message instead
+    // of silently doing nothing.
+    if (node.state !== 'active') return { blocked: 'already_depleted', wonBy: node.lastHitBy || null };
 
     const strikesRemaining = Math.max(0, node.strikesRemaining - hitCount);
     const wouldDeplete = strikesRemaining <= 0;

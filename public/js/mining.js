@@ -46,8 +46,37 @@
 //
 // Movement/anti-cheat caveat from before still applies: charX/charY are
 // still client-reported, not server-tracked - unchanged in this slice.
+//
+// This pass:
+// - other players' orbits are now visible. The server publicly broadcasts
+//   "account X is mining node Y from position (charX,charY)" on
+//   /startMining and clears it on /mineNode (server/lib/mining-session.js,
+//   locations/{id}/miningActivity/{account}) - connect() below subscribes
+//   to that collection and drawOtherMiners() renders a dim ghost character
+//   plus their swing for each entry. There's still no general
+//   player-position sync in this codebase, so someone merely walking
+//   around remains invisible to you - only someone actively mining shows
+//   up, since that's the only thing broadcast.
+// - the pickaxe no longer just orbits tight around the character - it
+//   winds up, then swings out along the line toward the node and strikes
+//   its edge (with a brief impact flash) before resetting, via
+//   computeSwingPose()/drawPickaxeAt() - shared by both our own swing and
+//   every other broadcast account's, so they read the same way.
+// - "Validating..." replaces the node's HP number the instant a
+//   prediction hits zero (or a cancel/snipe triggers finalizeMining with
+//   hits pending), instead of the old flash back to the pre-mine count
+//   while the session's one /mineNode call is in flight. It's driven by
+//   the same public broadcast's `validating` flag, so anyone watching the
+//   node sees it - not just whoever's swing triggered it - which is what
+//   makes two people mining the same node simultaneously legible: if
+//   someone else's batch finishes it first, node-manager.js's
+//   strikeNodeTx now reports back who (`already_depleted`/`wonBy`), and
+//   the loser gets a "beat you to it" toast instead of nothing happening.
+//   The nodes listener also proactively cancels our own swing the same
+//   way if we're sniped mid-orbit rather than after our own count hits
+//   zero (see connect()'s nodesRef handler).
 
-import { db, apiFetch } from './firebase-config.js?v=12';
+import { db, apiFetch } from './firebase-config.js?v=13';
 import { collection, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 
 const ROOM_SIZE = 2000;
@@ -141,14 +170,27 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   let wasTouchingWall = false; // edge-detects wall contact so the toast fires once, not every frame
   const keys = {};
   let unsubNodes = null;
+  let unsubMiningActivity = null;
   let rafId = null;
   let destroyed = false;
 
   // Active mining session, or null when idle/moving freely. localStrikesRemaining
   // is the client's own running prediction of the node's HP (see loop()'s
   // orbit-completion check below) - only pendingHits actually gets sent to
-  // the server, once, when the session ends (see finalizeMining).
+  // the server, once, when the session ends (see finalizeMining). `validating`
+  // flips true the instant the local prediction hits zero (or a cancel/snipe
+  // triggers finalizeMining with hits pending) - it freezes the swing and
+  // swaps the node's HP readout to "Validating..." until the server responds.
+  // `finalizing` just guards against finalizeMining running twice for the
+  // same session (e.g. Esc pressed right as the last orbit completes).
   let miningState = null;
+
+  // account -> { account, nodeId, charX, charY, startedAtMs, validating }
+  // for every OTHER player currently mining in this cave, from the public
+  // broadcast the server writes on /startMining and clears on /mineNode
+  // (see server/lib/mining-session.js). Never includes our own account -
+  // our own swing is drawn straight from miningState/player above.
+  let otherMiners = new Map();
 
   function toast(msg) {
     const div = document.createElement('div');
@@ -187,8 +229,10 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   function connect(id) {
     currentLocationId = id;
     nodes = new Map();
+    otherMiners = new Map();
 
     if (unsubNodes) unsubNodes();
+    if (unsubMiningActivity) unsubMiningActivity();
 
     const nodesRef = collection(db, 'locations', String(currentLocationId), 'nodes');
     unsubNodes = onSnapshot(nodesRef, (snap) => {
@@ -200,6 +244,31 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
           nodes.set(change.doc.id, { id: change.doc.id, ...data });
         } else {
           nodes.delete(change.doc.id); // depleted - hide until it respawns active again
+          // If that was OUR target and we hadn't already started finalizing
+          // ourselves, someone else's session just finished it off while we
+          // were still mid-swing. Stop swinging and let finalizeMining's
+          // server round trip report back who actually won it (see
+          // node-manager.js's 'already_depleted' branch) instead of leaving
+          // us stuck orbiting a node that's no longer there.
+          if (miningState && miningState.nodeId === change.doc.id && !miningState.finalizing) {
+            finalizeMining();
+          }
+        }
+      });
+    });
+
+    // Public broadcast of every OTHER account's active mining session in
+    // this cave (see server/lib/mining-session.js) - lets us draw their
+    // swing/orbit and surface "Validating..." on a node someone else is
+    // finishing, without needing a full player-position sync.
+    const activityRef = collection(db, 'locations', String(currentLocationId), 'miningActivity');
+    unsubMiningActivity = onSnapshot(activityRef, (snap) => {
+      snap.docChanges().forEach((change) => {
+        if (change.doc.id === account) return; // never render our own broadcast - we draw ourselves from local state
+        if (change.type === 'removed') {
+          otherMiners.delete(change.doc.id);
+        } else {
+          otherMiners.set(change.doc.id, { account: change.doc.id, ...change.doc.data() });
         }
       });
     });
@@ -303,23 +372,30 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         localStrikesRemaining: node.strikesRemaining,
         pendingHits: 0,
         orbitStartTime: performance.now(),
-        lastCompletedOrbits: 0
+        lastCompletedOrbits: 0,
+        validating: false,
+        finalizing: false
       };
     } catch (err) {
       toast(err.message === 'out_of_range' ? 'Too far to mine - get closer.' : "Can't mine that right now.");
     }
   }
 
-  // Ends the current mining session, however it ended (finished or
-  // cancelled), and syncs whatever hits actually landed with the server -
-  // this is the ONLY network call a whole session makes, no matter how
-  // many orbits/hits happened locally.
+  // Ends the current mining session, however it ended (finished, cancelled,
+  // or sniped by someone else finishing the node first), and syncs whatever
+  // hits actually landed with the server - this is the ONLY network call a
+  // whole session makes, no matter how many orbits/hits happened locally.
+  // Always calls through to the server, even with zero hits, so the
+  // server-side session and public broadcast doc always get cleaned up
+  // rather than lingering (see mining-session.js's clearBroadcast).
   async function finalizeMining() {
-    if (!miningState) return;
+    if (!miningState || miningState.finalizing) return;
+    miningState.finalizing = true; // freezes the swing (see drawMiningPickaxe) and blocks re-entry
     const { nodeId, pendingHits } = miningState;
-    miningState = null; // stop orbiting immediately - don't wait on the network for that
-
-    if (pendingHits === 0) return; // cancelled before completing even one orbit - nothing to sync
+    // Only worth a "Validating..." label if we actually have hits pending
+    // for the server to confirm - an instant cancel with nothing landed
+    // has nothing to validate, so just let it clear quietly.
+    if (pendingHits > 0) miningState.validating = true;
 
     try {
       const result = await apiFetch('/mineNode', {
@@ -327,15 +403,25 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
         authRequired: true,
         body: { account, locationId: currentLocationId, nodeId, hitCount: pendingHits }
       });
-      if (result.depleted) toast(`+1 ${result.oreType} (${result.value} coin value)`);
+      if (result.depleted) {
+        toast(`+1 ${result.oreType} (${result.value} coin value)`);
+      } else if (result.alreadyDepleted) {
+        toast(`Looks like ${result.wonBy || 'another miner'} beat you to it. Tough luck.`);
+      }
       if (typeof result.energy === 'number' && onEnergyChange) onEnergyChange(result.energy);
     } catch (err) {
       if (err.message === 'no_energy') {
         toast('⚡ Out of energy - go rest to recover.');
-      } else {
+      } else if (err.message !== 'no_active_session') {
+        // no_active_session means this got triggered twice in a race (e.g.
+        // the snipe-detector and a manual Esc landing back to back) - the
+        // first call already resolved things server-side, nothing new to
+        // report from the second.
         console.error('mineNode failed:', err);
         toast("Mining didn't register - try again.");
       }
+    } finally {
+      miningState = null; // only now, once the server has actually confirmed one way or another
     }
   }
 
@@ -514,6 +600,17 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     ctx.textAlign = 'left';
   }
 
+  // Is any OTHER account's broadcast currently validating (i.e. finishing
+  // its /mineNode call) against this node? Returns their account name, or
+  // null - used so a bystander (or a second concurrent miner) sees
+  // "Validating..." too, not just the account whose swing triggered it.
+  function otherValidatorFor(nodeId) {
+    for (const miner of otherMiners.values()) {
+      if (miner.nodeId === nodeId && miner.validating) return miner.account;
+    }
+    return null;
+  }
+
   function drawNode(node) {
     const [cx, cy] = toCanvas(node.x, node.y);
     const color = ORE_COLORS[node.oreType] || '#fff';
@@ -548,8 +645,23 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     // actively mining this node, show the client-predicted HP instead of
     // whatever Firestore last confirmed - that's the whole point of
     // predicting locally, see the file header note on why.
-    const shown = isTarget ? Math.max(0, miningState.localStrikesRemaining) : node.strikesRemaining;
-    const label = `${shown}/${node.maxStrikes}`;
+    //
+    // "Validating..." replaces the number the instant a prediction hits
+    // zero (or a cancel/snipe is being resolved) rather than letting it
+    // flash back to the pre-mine count while the one /mineNode call for
+    // this session is in flight - see finalizeMining. It shows for anyone
+    // watching the node, not just whoever's swing triggered it, since the
+    // server broadcasts the same `validating` flag publicly.
+    const otherValidator = !isTarget ? otherValidatorFor(node.id) : null;
+    let label;
+    if (isTarget && miningState.validating) {
+      label = 'Validating...';
+    } else if (otherValidator) {
+      label = 'Validating...';
+    } else {
+      const shown = isTarget ? Math.max(0, miningState.localStrikesRemaining) : node.strikesRemaining;
+      label = `${shown}/${node.maxStrikes}`;
+    }
     ctx.font = `bold ${Math.round(NODE_RADIUS * 0.34)}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -592,32 +704,128 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     if (miningState) {
       ctx.font = '16px sans-serif';
       ctx.fillStyle = '#fff';
-      ctx.fillText('Mining... click or Esc to cancel', cx, cy + PLAYER_RADIUS + 26);
+      const hint = miningState.validating ? 'Validating...' : 'Mining... click or Esc to cancel';
+      ctx.fillText(hint, cx, cy + PLAYER_RADIUS + 26);
     }
     ctx.textAlign = 'left';
   }
 
-  // The orbiting pickaxe - one full revolution = one hit (see loop() for
-  // where that's actually counted). Purely visual; only one can ever
-  // exist per character since starting a session requires not already
-  // being in one.
+  // Shared swing math for both our own pickaxe and every other broadcast
+  // account's (see server/lib/mining-session.js) - takes everything in
+  // canvas space so the same function draws any account's swing. One full
+  // cycle (0..1) is a wind-up (0-0.35) followed by an accelerating strike
+  // toward the node (0.35-1), rather than the old fixed-radius circle
+  // around the character - that read as orbiting *near* the character
+  // rather than actually hitting the node it's supposedly mining.
+  // `frozen` holds the pose at the moment of impact (t=1) instead of
+  // continuing to cycle - that's what "Validating..." looks like: the
+  // pickaxe stopped mid-swing, waiting on the server to confirm the hit.
+  function computeSwingPose(playerCanvasX, playerCanvasY, nodeCanvasX, nodeCanvasY, elapsedMs, frozen) {
+    const dx = nodeCanvasX - playerCanvasX, dy = nodeCanvasY - playerCanvasY;
+    const dist = Math.hypot(dx, dy) || 1;
+    const ux = dx / dist, uy = dy / dist; // unit vector from wielder toward the node
+    const perpX = -uy, perpY = ux; // perpendicular, for a slight arc rather than a straight slide
+
+    const t = frozen ? 1 : ((elapsedMs % ORBIT_PERIOD_MS) / ORBIT_PERIOD_MS);
+    const restPx = PLAYER_RADIUS + 14; // resting distance from the wielder, between swings
+    const strikePx = Math.max(restPx + 10, dist - NODE_RADIUS * 0.6); // reaches into the node's edge on impact
+
+    let radius, arcOffset;
+    if (t < 0.35) {
+      // Wind-up: pull back past the rest point and out to the side.
+      const wt = t / 0.35;
+      const ease = wt * wt;
+      radius = restPx - ease * (restPx * 0.5);
+      arcOffset = ease * 26;
+    } else {
+      // Strike: ease-out cubic so it's slow leaving the wind-up and slams
+      // the rest of the way, arcing back in line with the node by impact.
+      const st = Math.min((t - 0.35) / 0.65, 1);
+      const ease = 1 - Math.pow(1 - st, 3);
+      radius = (restPx * 0.5) + ease * (strikePx - restPx * 0.5);
+      arcOffset = 26 * (1 - ease);
+    }
+
+    return {
+      x: playerCanvasX + ux * radius + perpX * arcOffset,
+      y: playerCanvasY + uy * radius + perpY * arcOffset,
+      angle: Math.atan2(uy, ux),
+      impactFrac: Math.max(0, (t - 0.93) / 0.07) // 0..1 in the last sliver of the cycle, for a brief impact flash
+    };
+  }
+
+  function drawPickaxeAt(pose, nodeCanvasX, nodeCanvasY) {
+    ctx.save();
+    ctx.translate(pose.x, pose.y);
+    ctx.rotate(pose.angle);
+    ctx.fillStyle = '#7a5230'; // handle - trails back toward whoever's swinging it
+    ctx.fillRect(-24, -3, 20, 6);
+    ctx.fillStyle = '#c0c0c0'; // head - leads toward the node
+    ctx.fillRect(-4, -8, 22, 16);
+    ctx.strokeStyle = '#555';
+    ctx.strokeRect(-4, -8, 22, 16);
+    ctx.restore();
+
+    if (pose.impactFrac > 0) {
+      ctx.save();
+      ctx.globalAlpha = pose.impactFrac * 0.6;
+      ctx.beginPath();
+      ctx.arc(nodeCanvasX, nodeCanvasY, NODE_RADIUS + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // Our own pickaxe - one full swing cycle = one hit (see loop() for where
+  // that's actually counted). Frozen mid-swing once finalizing/validating,
+  // since at that point the session's outcome is up to the server, not
+  // another local orbit.
   function drawMiningPickaxe() {
     if (!miningState) return;
+    const node = nodes.get(miningState.nodeId);
+    if (!node) return; // vanished from the listener already - about to resolve via finalizeMining
     const elapsed = performance.now() - miningState.orbitStartTime;
-    const angle = ((elapsed % ORBIT_PERIOD_MS) / ORBIT_PERIOD_MS) * Math.PI * 2;
-    const [cx, cy] = toCanvas(player.x, player.y);
-    const orbitRadiusPx = PLAYER_RADIUS * 1.5;
-    const px = cx + Math.cos(angle) * orbitRadiusPx;
-    const py = cy + Math.sin(angle) * orbitRadiusPx;
+    const [pcx, pcy] = toCanvas(player.x, player.y);
+    const [ncx, ncy] = toCanvas(node.x, node.y);
+    const pose = computeSwingPose(pcx, pcy, ncx, ncy, elapsed, miningState.finalizing);
+    drawPickaxeAt(pose, ncx, ncy);
+  }
 
-    ctx.save();
-    ctx.translate(px, py);
-    ctx.rotate(angle + Math.PI / 2);
-    ctx.fillStyle = '#c0c0c0';
-    ctx.fillRect(-8, -14, 16, 28);
-    ctx.strokeStyle = '#555';
-    ctx.strokeRect(-8, -14, 16, 28);
-    ctx.restore();
+  // Every OTHER account currently mining in this cave (see the
+  // miningActivity broadcast in connect()) - a dim "ghost" character at
+  // their frozen (server-reported) position, labeled with their account,
+  // plus their own swing against whichever node they're targeting. This is
+  // the whole reason other players are visible at all right now: there's
+  // no general player-position sync in this codebase, only this
+  // mining-specific broadcast - so someone merely walking around still
+  // won't be visible to you, only someone actively mining.
+  function drawOtherMiners() {
+    for (const miner of otherMiners.values()) {
+      const node = nodes.get(miner.nodeId);
+      if (!node) continue; // depleted/unknown to us right now - nothing to anchor their swing to
+
+      const [pcx, pcy] = toCanvas(miner.charX, miner.charY);
+      const [ncx, ncy] = toCanvas(node.x, node.y);
+
+      ctx.beginPath();
+      ctx.arc(pcx, pcy, PLAYER_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(150,150,150,0.55)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(28,28,28,0.55)';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.textAlign = 'center';
+      ctx.font = `${Math.round(PLAYER_RADIUS * 0.28)}px sans-serif`;
+      ctx.fillText(miner.account, pcx, pcy - PLAYER_RADIUS - 10);
+      ctx.textAlign = 'left';
+
+      const elapsed = Date.now() - miner.startedAtMs; // server epoch ms - fine even with minor client/server clock drift for a 500ms cycle
+      const pose = computeSwingPose(pcx, pcy, ncx, ncy, elapsed, miner.validating);
+      drawPickaxeAt(pose, ncx, ncy);
+    }
   }
 
   function loop() {
@@ -629,7 +837,10 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     // Advance the mining swing, if any, and apply any newly-completed
     // orbit(s) as instant local hits. finalizeMining (triggered once HP
     // hits 0) is the only point any of this actually reaches the server.
-    if (miningState) {
+    // Skipped once finalizing/validating - the swing is frozen mid-strike
+    // at that point (see drawMiningPickaxe) and the outcome is up to the
+    // server's response, not another local orbit.
+    if (miningState && !miningState.finalizing) {
       const elapsed = performance.now() - miningState.orbitStartTime;
       const completedOrbits = Math.floor(elapsed / ORBIT_PERIOD_MS);
       if (completedOrbits > miningState.lastCompletedOrbits) {
@@ -661,6 +872,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     drawFloor();
     drawWalls();
     for (const node of nodes.values()) drawNode(node);
+    drawOtherMiners();
     drawCharacter(player.x, player.y, account || '', touchingWall);
     drawMiningPickaxe();
     rafId = requestAnimationFrame(loop);
@@ -675,6 +887,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
       destroyed = true;
       if (rafId) cancelAnimationFrame(rafId);
       if (unsubNodes) unsubNodes();
+      if (unsubMiningActivity) unsubMiningActivity();
       canvas.removeEventListener('click', onCanvasClick);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
