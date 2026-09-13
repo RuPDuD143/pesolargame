@@ -27,19 +27,34 @@ changed — only where the backend code physically runs.
 2. **Turn on Firestore and Authentication** — same as before (Build →
    Firestore Database → Create database, Start in production mode;
    Build → Authentication → Get started). Both are free on Spark.
-3. **Create the `sysdata/main` Firestore doc by hand** — same as before:
+3. **Turn on Realtime Database, then deploy its rules** — Build →
+   Realtime Database → Create database (any region, start in locked
+   mode is fine, the rules below override it). This is a *second*
+   database alongside Firestore, used only for live player-position
+   presence (see `database.rules.json`'s comments for why that one
+   piece doesn't live in Firestore). Copy the URL shown at the top of
+   that page — it looks like
+   `https://YOUR-PROJECT-default-rtdb.REGION.firebasedatabase.app` —
+   you'll need it in step 6. Then deploy its security rules:
+   `npm install -g firebase-tools` (if you haven't already), `firebase
+   login`, `firebase deploy --only database` from this folder. **Note:**
+   the GitHub Actions workflow in step 9 only deploys Firestore rules +
+   Hosting, not this — re-run `firebase deploy --only database` by hand
+   any time you edit `database.rules.json`.
+4. **Create the `sysdata/main` Firestore doc by hand** — same as before:
    collection `sysdata`, document `main`, fields `resources` (Number,
    e.g. 1000000) and `minedResources` (Number, 0).
-4. **Get your service account key** — same as before: Project settings
+5. **Get your service account key** — same as before: Project settings
    → Service accounts → Generate new private key. You'll paste this
-   JSON into two places now: a GitHub secret (step 7) *and* Render's
-   dashboard (step 6) — same file, two destinations, never committed to
+   JSON into two places now: a GitHub secret (step 8) *and* Render's
+   dashboard (step 7) — same file, two destinations, never committed to
    the repo itself.
-5. **Fill in `public/js/firebase-config.js`** — same as before: replace
-   the `TODO` fields with your real config values. Leave
-   `API_BASE_URL: 'TODO'` for now — you'll fill that in after step 6.
-6. **Deploy the backend server to Render (free, no card required)**
-   - Push this folder to GitHub first if you haven't (see step 7 below —
+6. **Fill in `public/js/firebase-config.js`** — same as before: replace
+   the `TODO` fields with your real config values, including
+   `databaseURL` from step 3. Leave `API_BASE_URL: 'TODO'` for now —
+   you'll fill that in after step 7.
+7. **Deploy the backend server to Render (free, no card required)**
+   - Push this folder to GitHub first if you haven't (see step 8 below —
      you can do that step before this one if it's easier).
    - Go to render.com, sign up/sign in (GitHub sign-in is easiest),
      click **New +** → **Web Service**, connect your GitHub repo.
@@ -48,7 +63,7 @@ changed — only where the backend code physically runs.
      Command**: `npm start`. **Instance Type**: Free.
    - Under **Environment**, add these variables:
      - `FIREBASE_SERVICE_ACCOUNT_JSON` — paste the *entire contents* of
-       the .json file from step 4, as-is.
+       the .json file from step 5, as-is.
      - `ALLOWED_ORIGIN` — you can leave this unset for now (defaults to
        `*`); tighten it to `https://YOUR-PROJECT-ID.web.app` once the
        game is live.
@@ -61,27 +76,28 @@ changed — only where the backend code physically runs.
      minutes of no traffic and takes 30-60 seconds to wake back up on
      the next request — fine for a personal/hobby game, just expect a
      slow first load after idle periods.
-7. **Upload the folder to GitHub using GitHub Desktop** — identical to
+8. **Upload the folder to GitHub using GitHub Desktop** — identical to
    before: Add local repository → Commit → Publish repository.
-8. **Add the one GitHub Secret Firebase Hosting still needs, then seed
+9. **Add the one GitHub Secret Firebase Hosting still needs, then seed
    the world**
    - On github.com, open your repo → Settings → Secrets and variables →
      Actions → New repository secret: name it `FIREBASE_SERVICE_ACCOUNT`,
-     value = the same .json contents from step 4. Add a second secret,
+     value = the same .json contents from step 5. Add a second secret,
      `FIREBASE_PROJECT_ID`, with your Project ID.
    - Click the **Actions** tab — a "Deploy to Firebase" run should
      already be going; wait for the green checkmark (this one only
-     deploys Firestore rules + Hosting, both free).
+     deploys Firestore rules + Hosting, both free — see step 3's note
+     about Realtime Database rules needing a manual deploy).
    - Open `https://YOUR-BACKEND-ON-RENDER.onrender.com/seedLocations`
      in a browser tab and press enter — it should say "ok".
    - Finally, open `https://YOUR-PROJECT-ID.web.app` to see the game
      live.
 
 Local dev: `npm install -g firebase-tools`, `firebase emulators:start`
-for Firestore/Hosting/Auth, and separately `cd server && npm install &&
-npm start` (with a local `.env` — see `server/.env.example`, note
-Render reads env vars from its dashboard, not a committed file) for the
-backend.
+for Firestore/Realtime Database/Hosting/Auth, and separately `cd server
+&& npm install && npm start` (with a local `.env` — see
+`server/.env.example`, note Render reads env vars from its dashboard,
+not a committed file) for the backend.
 
 ## What's still not built
 
@@ -93,8 +109,9 @@ movement (the 200px throw clamp still trusts client-reported
 
 ```
 .gitignore, .firebaserc.example
-.github/workflows/deploy.yml   — deploys Firestore rules + Hosting only (free, Spark plan)
+.github/workflows/deploy.yml   — deploys Firestore rules + Hosting only (free, Spark plan) - NOT database.rules.json, see step 3
 firebase.json, firestore.rules, firestore.indexes.json
+database.rules.json            — Realtime Database rules: player-position presence only (see file header)
 server/                        — always-on Express backend (deploy to Render, not Firebase)
   .env.example                 — shape of the env vars Render needs
   index.js                     — all backend routes (was functions/index.js)
@@ -109,8 +126,8 @@ server/                        — always-on Express backend (deploy to Render, 
   lib/respawn-sweep.js          — replaces Cloud Tasks: polls for depleted nodes past their respawn time
 public/
   index.html, mining.html, css/style.css
-  js/firebase-config.js         — TODO: your real Firebase config + Render backend URL
+  js/firebase-config.js         — TODO: your real Firebase config (incl. databaseURL) + Render backend URL
   js/wallet.js                  — WharfKit + login-proof signing (now calls the REST backend)
   js/app.js                     — worker status/registration/wake UI (now calls the REST backend)
-  js/mining.js                  — Firestore-listener mining client (now calls the REST backend)
+  js/mining.js                  — Firestore-listener mining client (now calls the REST backend); player-position presence goes straight to Realtime Database instead
 ```

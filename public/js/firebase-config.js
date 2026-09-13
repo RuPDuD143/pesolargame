@@ -5,6 +5,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js';
 import { getAuth, signInWithCustomToken } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js';
 import { getFirestore } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
+import { getDatabase } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyDrJSgCNjAx7eE263tQDwpi5rkYXl-L_Os",
@@ -12,7 +13,16 @@ const firebaseConfig = {
   projectId: "pesolargame",
   storageBucket: "pesolargame.firebasestorage.app",
   messagingSenderId: "835487257937",
-  appId: "1:835487257937:web:b1fcf57ff9753afa46af70"
+  appId: "1:835487257937:web:b1fcf57ff9753afa46af70",
+  // TODO: enable Realtime Database (Build -> Realtime Database -> Create
+  // database, any region) and paste its URL here - Firebase Console shows
+  // it at the top of that page, or under Project settings -> General ->
+  // Your apps once RTDB is enabled. Looks like
+  // "https://<project>-default-rtdb.<region>.firebasedatabase.app". This
+  // is separate from Firestore (projectId above) - only live player-
+  // position presence (public/js/mining.js) lives here; see
+  // database.rules.json for why.
+  databaseURL: "https://pesolargame-default-rtdb.firebaseio.com/"
 };
 
 // Fails loudly and immediately if this file ever gets deployed with the
@@ -24,10 +34,14 @@ const firebaseConfig = {
 if (!firebaseConfig.apiKey || firebaseConfig.apiKey === 'TODO') {
   throw new Error('firebase-config.js: apiKey is missing/placeholder - paste your real config from the Firebase Console.');
 }
+if (!firebaseConfig.databaseURL || firebaseConfig.databaseURL === 'TODO') {
+  throw new Error('firebase-config.js: databaseURL is missing/placeholder - enable Realtime Database in the Firebase Console and paste its URL here (see the TODO above).');
+}
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+export const rtdb = getDatabase(app);
 export { signInWithCustomToken };
 
 export const CONFIG = {
@@ -73,3 +87,4 @@ export async function apiFetch(path, { method = 'GET', body, authRequired = fals
   if (!res.ok) throw new Error(data.error || `request_failed_${res.status}`);
   return data;
 }
+

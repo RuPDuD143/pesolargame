@@ -11,6 +11,12 @@ rules_version = '2';
 // request.auth.uid, when set, is a WAX account name - it is only ever
 // set by admin.auth().createCustomToken(accountName) after signature
 // verification succeeds (see functions/index.js: verifyLogin).
+//
+// Live player-position presence (public/js/mining.js) lives in the
+// Realtime Database instead (see database.rules.json), not here - it's a
+// high-frequency, ephemeral workload that doesn't fit Firestore's
+// per-operation Spark-plan quota, and unlike everything in this file it's
+// written directly by the client, not a Cloud Function.
 
 service cloud.firestore {
   match /databases/{database}/documents {

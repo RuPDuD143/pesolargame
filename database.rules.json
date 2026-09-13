@@ -1,0 +1,41 @@
+{
+  // Realtime Database rules - only ever holds live player-position
+  // presence now (see public/js/mining.js's file header and
+  // server/lib/mining-session.js for why that's a Firestore-quota-hostile
+  // workload, and why RTDB - metered by connections/bandwidth on Spark,
+  // not per read/write - is the right store for it instead). Firestore
+  // (firestore.rules) still owns everything else: nodes, mining sessions,
+  // workers, inventory.
+  //
+  // Unlike Firestore, position here is written by the CLIENT directly,
+  // not the Express server - there's no anti-cheat reason it has to go
+  // through the backend (charX/charY are already untrusted, client-
+  // reported data everywhere else in this codebase too; see mining.js's
+  // longstanding movement/anti-cheat caveat). auth.uid is only ever a WAX
+  // account name that proved key ownership via the login flow (same
+  // custom-token minting Firestore's own rules rely on), so "you can only
+  // write your own presence node" falls straight out of that.
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "presence": {
+      "$locationId": {
+        // Anyone can read a location's whole presence list - that's what
+        // lets every other client render a ghost for you.
+        ".read": true,
+
+        "$account": {
+          // Only the signed-in account matching this node's key may write
+          // it - nobody can spoof another player's position.
+          ".write": "auth != null && auth.uid === $account",
+          ".validate": "newData.hasChildren(['charX', 'charY', 'updatedAtMs'])",
+          "charX": { ".validate": "newData.isNumber()" },
+          "charY": { ".validate": "newData.isNumber()" },
+          "updatedAtMs": { ".validate": "newData.isNumber()" },
+          "$other": { ".validate": false }
+        }
+      }
+    }
+  }
+}

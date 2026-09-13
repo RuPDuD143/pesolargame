@@ -75,9 +75,52 @@
 //   The nodes listener also proactively cancels our own swing the same
 //   way if we're sniped mid-orbit rather than after our own count hits
 //   zero (see connect()'s nodesRef handler).
+//
+// This pass:
+// - general player-position sync: someone merely walking around is now
+//   visible too, not just someone actively mining. This lives in the
+//   Realtime Database, not Firestore (see database.rules.json) - a
+//   several-times-a-second position feed doesn't fit Firestore's Spark-
+//   plan per-operation daily quota (a single continuously-moving player
+//   could burn the whole app's daily write budget in ~2 hours), whereas
+//   RTDB's Spark tier is metered by connections/bandwidth instead, which
+//   is exactly this workload. It's also written straight from the client
+//   (not through server/index.js) - there's no anti-cheat reason it
+//   needs a server round trip, since charX/charY are already untrusted,
+//   client-reported data everywhere else in this file too (see the
+//   movement/anti-cheat caveat above). connect() below subscribes to
+//   presence/{locationId} the same way it already does for
+//   miningActivity, and drawOtherPlayers() renders a ghost for each
+//   entry; an account that's also actively mining is skipped there and
+//   left entirely to drawOtherMiners(), so it isn't drawn twice.
+//   sendPresenceIfNeeded() still throttles how often we actually write
+//   (PRESENCE_MIN_SEND_INTERVAL_MS moving / PRESENCE_IDLE_RESEND_MS
+//   idle) - not because RTDB bills per write, but to keep bandwidth and
+//   the on-screen motion reasonable. Cleanup uses RTDB's onDisconnect(),
+//   which the client registers on its own presence node the moment it
+//   (re)connects (see the `.info/connected` listener near the bottom of
+//   mountMine()) - the database itself removes that node the instant the
+//   socket drops, no heartbeat-staleness guessing game required.
+// - other players' node HP now actually ticks down while you watch them
+//   mine, instead of sitting frozen until their session ends and either
+//   jumps to a new number or the node just vanishes. Previously the only
+//   Firestore write for a whole mining session happened once, at the
+//   very end (see /mineNode) - so a bystander had nothing to read mid-
+//   session. otherMinerProgressForNode() below predicts it the same way
+//   we already predict our OWN hits locally: from elapsed real time
+//   since the broadcast's startedAtMs, at one hit per ORBIT_PERIOD_MS,
+//   subtracted from the node's last-confirmed strikesRemaining (which,
+//   since nothing rewrites it mid-session, is exactly what it was when
+//   they started). Once they go `validating`, their real final count is
+//   up to the server, not predictable from elapsed time anymore, so it
+//   falls back to the existing "Validating..." label at that point
+//   rather than guessing further.
 
-import { db, apiFetch } from './firebase-config.js?v=13';
+import { db, rtdb, apiFetch } from './firebase-config.js?v=13';
 import { collection, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
+import {
+  ref, onValue, set, remove, onDisconnect, serverTimestamp
+} from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js';
 
 const ROOM_SIZE = 2000;
 const CANVAS_SIZE = 800;
@@ -90,6 +133,18 @@ const CAMERA_FOLLOW = 0.08; // 0-1 per frame - how quickly the camera eases towa
 const HIT_RADIUS = 50; // world units - click-proximity tolerance for "which node did you click", unrelated to pixel sizes above
 const MINING_RANGE = 150; // world units - how close the character has to be to a node to mine it; must match server/lib/mining-session.js's MINING_RANGE
 const ORBIT_PERIOD_MS = 500; // one orbit = one hit; must match server/lib/mining-session.js's MINE_ORBIT_PERIOD_MS
+
+// General player-position heartbeat (see file header). Kept deliberately
+// throttled - Firestore's free plan has a daily write quota, and this is
+// the one thing here that scales with how long people just stand around
+// with the tab open, not with how much they actually mine.
+// General player-position heartbeat (see file header). This now lives in
+// RTDB, which isn't billed per write on Spark - so this throttle exists
+// for bandwidth/smoothness reasons, not to dodge a Firestore write quota.
+const PRESENCE_MOVE_EPSILON = 4; // world units - smaller jitter than this doesn't count as "moved"
+const PRESENCE_MIN_SEND_INTERVAL_MS = 150; // fastest we'll resend while actively moving
+const PRESENCE_IDLE_RESEND_MS = 10000; // slowest we'll resend while standing still - mostly just keeps updatedAtMs fresh; onDisconnect (not this) is what actually guarantees cleanup
+const PRESENCE_CLIENT_STALE_MS = 20000; // defensive client-side filter well above PRESENCE_IDLE_RESEND_MS, in case onDisconnect somehow didn't fire yet
 
 export const ORE_COLORS = {
   stone: '#8a8a8a', iron: '#a5673f', gold: '#e8c547',
@@ -171,8 +226,16 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   const keys = {};
   let unsubNodes = null;
   let unsubMiningActivity = null;
+  let unsubPresenceValue = null; // onValue() unsubscribe for the current location's presence/{locationId} node
+  let unsubConnected = null; // onValue() unsubscribe for the one-time '.info/connected' listener, set up once below
   let rafId = null;
   let destroyed = false;
+  let previousLocationId = null; // whichever cave we're leaving, so connect() can tear down our presence node there
+
+  // Presence heartbeat throttle state - see PRESENCE_* constants above.
+  let lastPresenceSentAt = 0;
+  let lastPresenceX = null;
+  let lastPresenceY = null;
 
   // Active mining session, or null when idle/moving freely. localStrikesRemaining
   // is the client's own running prediction of the node's HP (see loop()'s
@@ -191,6 +254,15 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   // (see server/lib/mining-session.js). Never includes our own account -
   // our own swing is drawn straight from miningState/player above.
   let otherMiners = new Map();
+
+  // account -> { account, charX, charY, updatedAtMs } for every OTHER
+  // player currently present in this cave (see the RTDB presence/
+  // {locationId} node this subscribes to in connect(), and
+  // sendPresenceIfNeeded() below). Never includes our own account.
+  // Someone who's also actively mining still has an entry here, but
+  // drawOtherPlayers() skips anyone present in otherMiners so they're
+  // only ever drawn once, by drawOtherMiners(), with their swing.
+  let otherPlayers = new Map();
 
   function toast(msg) {
     const div = document.createElement('div');
@@ -226,13 +298,63 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     camera.y += (player.y - camera.y) * CAMERA_FOLLOW;
   }
 
+  // RTDB ref for our own presence node in whichever cave `locationId`
+  // refers to - presence/{locationId}/{account}. Every write, the
+  // onDisconnect registration, and the explicit remove() on leaving all
+  // point at this same path shape.
+  function myPresenceRef(locationId) {
+    return ref(rtdb, `presence/${locationId}/${account}`);
+  }
+
+  // (Re-)establishes our presence in whichever cave is currently active:
+  // arms onDisconnect().remove() on our node (so the database itself
+  // clears it the instant this socket drops, no heartbeat-staleness
+  // guessing needed) and writes our current position. Called once per
+  // location from connect(), and again any time the client (re)connects
+  // to RTDB at all (see the `.info/connected` listener below) - a fresh
+  // connection needs its own onDisconnect registration, since the
+  // previous one only applied to the connection that just dropped.
+  function armPresenceForCurrentLocation() {
+    if (!account) return;
+    const myRef = myPresenceRef(currentLocationId);
+    onDisconnect(myRef).remove().catch(() => {});
+    set(myRef, { charX: player.x, charY: player.y, updatedAtMs: serverTimestamp() }).catch((err) => {
+      console.error('presence set failed (non-fatal):', err.message);
+    });
+    lastPresenceSentAt = Date.now();
+    lastPresenceX = player.x;
+    lastPresenceY = player.y;
+  }
+
+  // Explicit, immediate leave for a cave we're walking out of (as opposed
+  // to onDisconnect, which only fires if the whole connection drops) -
+  // cancels that location's onDisconnect registration too, so it doesn't
+  // sit around pointed at a node we've already removed ourselves.
+  function leavePresence(locationId) {
+    if (!account || locationId === null) return;
+    const oldRef = myPresenceRef(locationId);
+    onDisconnect(oldRef).cancel().catch(() => {});
+    remove(oldRef).catch(() => {});
+  }
+
   function connect(id) {
+    // Leaving a cave we were actually in (not the very first connect, and
+    // not a no-op reconnect to the same id) - tear down our presence node
+    // there immediately rather than leaving it for onDisconnect, which
+    // only fires on an actual connection drop, not a location change.
+    if (previousLocationId !== null && previousLocationId !== id) {
+      leavePresence(previousLocationId);
+    }
+    previousLocationId = id;
+
     currentLocationId = id;
     nodes = new Map();
     otherMiners = new Map();
+    otherPlayers = new Map();
 
     if (unsubNodes) unsubNodes();
     if (unsubMiningActivity) unsubMiningActivity();
+    if (unsubPresenceValue) unsubPresenceValue();
 
     const nodesRef = collection(db, 'locations', String(currentLocationId), 'nodes');
     unsubNodes = onSnapshot(nodesRef, (snap) => {
@@ -273,7 +395,69 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
       });
     });
 
+    // General player-position broadcast (see file header) - RTDB's
+    // onValue() hands back the WHOLE presence/{locationId} subtree every
+    // time anything under it changes (unlike Firestore's incremental
+    // docChanges()), so this just rebuilds otherPlayers wholesale each
+    // callback rather than patching it - simple, and cheap enough for
+    // however many players are realistically ever in one cave at once.
+    const presenceListRef = ref(rtdb, `presence/${currentLocationId}`);
+    unsubPresenceValue = onValue(presenceListRef, (snap) => {
+      const val = snap.val() || {};
+      const next = new Map();
+      for (const [acct, data] of Object.entries(val)) {
+        if (acct === account) continue; // never render ourselves from the broadcast
+        next.set(acct, { account: acct, ...data });
+      }
+      otherPlayers = next;
+    });
+
+    // (Re-)establish our own presence node in the new cave right away,
+    // rather than waiting for the next loop() tick's throttled heartbeat -
+    // otherwise we'd be invisible to anyone already there for up to
+    // PRESENCE_IDLE_RESEND_MS after arriving.
+    armPresenceForCurrentLocation();
+
     if (onLocationChange) onLocationChange(id);
+  }
+
+  // Re-arms presence (new onDisconnect + a fresh write) any time this
+  // client (re)connects to RTDB at all - including the very first
+  // connection. A dropped/restored network connection needs its own
+  // onDisconnect registration, since the one from before the drop only
+  // ever applied to that now-dead connection. Set up once here, not
+  // per-connect() - it always targets whatever currentLocationId
+  // currently is at the moment it fires.
+  unsubConnected = onValue(ref(rtdb, '.info/connected'), (snap) => {
+    if (snap.val() === true) armPresenceForCurrentLocation();
+  });
+
+  // Heartbeats our own position so other clients' presence listeners see
+  // us move. Throttled for bandwidth/smoothness, not to dodge a write
+  // quota (RTDB isn't billed per-operation on Spark - see file header):
+  // resends promptly while actually moving (capped at
+  // PRESENCE_MIN_SEND_INTERVAL_MS so holding a direction key doesn't spam
+  // a write every frame), otherwise just occasionally while standing
+  // still to keep updatedAtMs fresh - onDisconnect, not this, is what
+  // actually guarantees cleanup.
+  function sendPresenceIfNeeded() {
+    if (!account) return;
+    const now = Date.now();
+    const moved = lastPresenceX === null ||
+      Math.hypot(player.x - lastPresenceX, player.y - lastPresenceY) > PRESENCE_MOVE_EPSILON;
+    if (moved && now - lastPresenceSentAt < PRESENCE_MIN_SEND_INTERVAL_MS) return;
+    if (!moved && now - lastPresenceSentAt < PRESENCE_IDLE_RESEND_MS) return;
+
+    lastPresenceSentAt = now;
+    lastPresenceX = player.x;
+    lastPresenceY = player.y;
+    set(myPresenceRef(currentLocationId), {
+      charX: player.x, charY: player.y, updatedAtMs: serverTimestamp()
+    }).catch((err) => {
+      // Best-effort, like the mining broadcast - a dropped update just
+      // means we're stale to others until the next one lands.
+      console.error('presence set failed (non-fatal):', err.message);
+    });
   }
 
   function onKeyDown(e) {
@@ -283,6 +467,12 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   function onKeyUp(e) { keys[e.key.toLowerCase()] = false; }
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
+
+  // No pagehide/beforeunload handler needed for presence cleanup anymore -
+  // RTDB's onDisconnect() (armed in armPresenceForCurrentLocation()) is a
+  // server-side promise that fires the instant this socket actually
+  // drops, tab-close/crash included, which is strictly better than a
+  // best-effort handler racing the page's teardown.
 
   // The room rect plus, for whichever walls this cave actually has a
   // walkway on, the little alcove past that wall where the passage leads -
@@ -600,15 +790,28 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     ctx.textAlign = 'left';
   }
 
-  // Is any OTHER account's broadcast currently validating (i.e. finishing
-  // its /mineNode call) against this node? Returns their account name, or
-  // null - used so a bystander (or a second concurrent miner) sees
-  // "Validating..." too, not just the account whose swing triggered it.
-  function otherValidatorFor(nodeId) {
+  // Predicts how much progress every OTHER account currently mining this
+  // node has made, the same way we predict our OWN hits locally (see
+  // miningState.localStrikesRemaining in loop()): one hit per
+  // ORBIT_PERIOD_MS elapsed since their broadcast's startedAtMs. This is
+  // what makes a bystander see the HP count actually tick down while
+  // someone else's swing plays, instead of it sitting frozen until their
+  // session ends (see the file header on why nothing rewrites the node's
+  // real Firestore doc mid-session).
+  //
+  // Once any of them flips into `validating`, their true final hit count
+  // is up to the server, not predictable from elapsed time - `validating`
+  // comes back true in that case, and the caller falls back to the
+  // existing "Validating..." label rather than guessing further.
+  function otherMinerProgressForNode(nodeId) {
+    let hits = 0;
+    let validating = false;
     for (const miner of otherMiners.values()) {
-      if (miner.nodeId === nodeId && miner.validating) return miner.account;
+      if (miner.nodeId !== nodeId) continue;
+      if (miner.validating) { validating = true; continue; }
+      hits += Math.floor((Date.now() - miner.startedAtMs) / ORBIT_PERIOD_MS);
     }
-    return null;
+    return { hits, validating };
   }
 
   function drawNode(node) {
@@ -651,15 +854,20 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     // flash back to the pre-mine count while the one /mineNode call for
     // this session is in flight - see finalizeMining. It shows for anyone
     // watching the node, not just whoever's swing triggered it, since the
-    // server broadcasts the same `validating` flag publicly.
-    const otherValidator = !isTarget ? otherValidatorFor(node.id) : null;
+    // server broadcasts the same `validating` flag publicly. Between that
+    // and otherMinerProgressForNode()'s elapsed-time prediction above, a
+    // bystander sees this node's HP actually counting down while someone
+    // else mines it, not just a number that jumps once at the end.
+    const otherProgress = !isTarget ? otherMinerProgressForNode(node.id) : null;
     let label;
     if (isTarget && miningState.validating) {
       label = 'Validating...';
-    } else if (otherValidator) {
+    } else if (otherProgress && otherProgress.validating) {
       label = 'Validating...';
     } else {
-      const shown = isTarget ? Math.max(0, miningState.localStrikesRemaining) : node.strikesRemaining;
+      const shown = isTarget
+        ? Math.max(0, miningState.localStrikesRemaining)
+        : Math.max(0, node.strikesRemaining - (otherProgress ? otherProgress.hits : 0));
       label = `${shown}/${node.maxStrikes}`;
     }
     ctx.font = `bold ${Math.round(NODE_RADIUS * 0.34)}px sans-serif`;
@@ -801,6 +1009,40 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   // no general player-position sync in this codebase, only this
   // mining-specific broadcast - so someone merely walking around still
   // won't be visible to you, only someone actively mining.
+  // Shared ghost-body-plus-label rendering for any other account, whether
+  // they're just standing/walking (drawOtherPlayers) or mid-swing
+  // (drawOtherMiners) - factored out so both read the same way as each
+  // other and as this file's own drawCharacter().
+  function drawGhostCharacter(pcx, pcy, label) {
+    ctx.beginPath();
+    ctx.arc(pcx, pcy, PLAYER_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(150,150,150,0.55)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(28,28,28,0.55)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.textAlign = 'center';
+    ctx.font = `${Math.round(PLAYER_RADIUS * 0.28)}px sans-serif`;
+    ctx.fillText(label, pcx, pcy - PLAYER_RADIUS - 10);
+    ctx.textAlign = 'left';
+  }
+
+  // Every OTHER account just present in this cave (see the presence
+  // broadcast in connect()/sendPresenceIfNeeded()) that ISN'T currently
+  // mining - anyone actively mining is drawn by drawOtherMiners() instead
+  // (with their swing), so they're skipped here to avoid a double-draw.
+  // This is what makes someone merely walking around visible at all - see
+  // the file header on why that wasn't true before this pass.
+  function drawOtherPlayers() {
+    for (const p of otherPlayers.values()) {
+      if (otherMiners.has(p.account)) continue;
+      if (Date.now() - p.updatedAtMs > PRESENCE_CLIENT_STALE_MS) continue; // defensive - onDisconnect should normally have removed this node already
+      const [pcx, pcy] = toCanvas(p.charX, p.charY);
+      drawGhostCharacter(pcx, pcy, p.account);
+    }
+  }
+
   function drawOtherMiners() {
     for (const miner of otherMiners.values()) {
       const node = nodes.get(miner.nodeId);
@@ -809,18 +1051,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
       const [pcx, pcy] = toCanvas(miner.charX, miner.charY);
       const [ncx, ncy] = toCanvas(node.x, node.y);
 
-      ctx.beginPath();
-      ctx.arc(pcx, pcy, PLAYER_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(150,150,150,0.55)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(28,28,28,0.55)';
-      ctx.lineWidth = 3;
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.textAlign = 'center';
-      ctx.font = `${Math.round(PLAYER_RADIUS * 0.28)}px sans-serif`;
-      ctx.fillText(miner.account, pcx, pcy - PLAYER_RADIUS - 10);
-      ctx.textAlign = 'left';
+      drawGhostCharacter(pcx, pcy, miner.account);
 
       const elapsed = Date.now() - miner.startedAtMs; // server epoch ms - fine even with minor client/server clock drift for a 500ms cycle
       const pose = computeSwingPose(pcx, pcy, ncx, ncy, elapsed, miner.validating);
@@ -833,6 +1064,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     updateMovement(); // guests move too now; frozen automatically while mining (see updateMovement)
     checkExitTravel();
     updateCamera();
+    sendPresenceIfNeeded();
 
     // Advance the mining swing, if any, and apply any newly-completed
     // orbit(s) as instant local hits. finalizeMining (triggered once HP
@@ -872,6 +1104,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     drawFloor();
     drawWalls();
     for (const node of nodes.values()) drawNode(node);
+    drawOtherPlayers();
     drawOtherMiners();
     drawCharacter(player.x, player.y, account || '', touchingWall);
     drawMiningPickaxe();
@@ -888,6 +1121,9 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
       if (rafId) cancelAnimationFrame(rafId);
       if (unsubNodes) unsubNodes();
       if (unsubMiningActivity) unsubMiningActivity();
+      if (unsubPresenceValue) unsubPresenceValue();
+      if (unsubConnected) unsubConnected();
+      leavePresence(currentLocationId);
       canvas.removeEventListener('click', onCanvasClick);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
