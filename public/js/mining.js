@@ -88,8 +88,12 @@
 //   (not through server/index.js) - there's no anti-cheat reason it
 //   needs a server round trip, since charX/charY are already untrusted,
 //   client-reported data everywhere else in this file too (see the
-//   movement/anti-cheat caveat above). connect() below subscribes to
-//   presence/{locationId} the same way it already does for
+//   movement/anti-cheat caveat above). Each account's node lives under
+//   an opaque push() key rather than the account name itself - RTDB
+//   keys can't contain '.', which WAX account names commonly do (see
+//   armPresenceForCurrentLocation() and database.rules.json). connect()
+//   below subscribes to presence/{locationId} the same way it already
+//   does for
 //   miningActivity, and drawOtherPlayers() renders a ghost for each
 //   entry; an account that's also actively mining is skipped there and
 //   left entirely to drawOtherMiners(), so it isn't drawn twice.
@@ -119,7 +123,7 @@
 import { db, rtdb, apiFetch } from './firebase-config.js?v=13';
 import { collection, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 import {
-  ref, onValue, set, remove, onDisconnect, serverTimestamp
+  ref, push, onValue, set, remove, onDisconnect, serverTimestamp
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js';
 
 const ROOM_SIZE = 2000;
@@ -230,7 +234,6 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   let unsubConnected = null; // onValue() unsubscribe for the one-time '.info/connected' listener, set up once below
   let rafId = null;
   let destroyed = false;
-  let previousLocationId = null; // whichever cave we're leaving, so connect() can tear down our presence node there
 
   // Presence heartbeat throttle state - see PRESENCE_* constants above.
   let lastPresenceSentAt = 0;
@@ -298,27 +301,34 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     camera.y += (player.y - camera.y) * CAMERA_FOLLOW;
   }
 
-  // RTDB ref for our own presence node in whichever cave `locationId`
-  // refers to - presence/{locationId}/{account}. Every write, the
-  // onDisconnect registration, and the explicit remove() on leaving all
-  // point at this same path shape.
-  function myPresenceRef(locationId) {
-    return ref(rtdb, `presence/${locationId}/${account}`);
-  }
+  // Our own current presence node, as an actual DatabaseReference - not
+  // derived from the account name, since RTDB keys can't contain '.' and
+  // WAX account names commonly do (e.g. "foo.bar.wam" - this is exactly
+  // what broke the first version of this). Instead each (re)connect
+  // mints a fresh, opaque push() key (see armPresenceForCurrentLocation
+  // below) and the real account name travels as a FIELD inside the
+  // node's data instead of as its key - see database.rules.json for how
+  // the security rule checks that field instead of the path.
+  let myPresenceRef = null;
 
   // (Re-)establishes our presence in whichever cave is currently active:
-  // arms onDisconnect().remove() on our node (so the database itself
-  // clears it the instant this socket drops, no heartbeat-staleness
-  // guessing needed) and writes our current position. Called once per
+  // mints a new push() key under presence/{locationId}, arms
+  // onDisconnect().remove() on it (so the database itself clears it the
+  // instant this socket drops, no heartbeat-staleness guessing needed),
+  // and writes our current position + account name. Called once per
   // location from connect(), and again any time the client (re)connects
   // to RTDB at all (see the `.info/connected` listener below) - a fresh
   // connection needs its own onDisconnect registration, since the
-  // previous one only applied to the connection that just dropped.
+  // previous one only applied to the connection that just dropped (and,
+  // being a brand new key each time, never collides with whatever the
+  // dropped connection's node was anyway).
   function armPresenceForCurrentLocation() {
     if (!account) return;
-    const myRef = myPresenceRef(currentLocationId);
-    onDisconnect(myRef).remove().catch(() => {});
-    set(myRef, { charX: player.x, charY: player.y, updatedAtMs: serverTimestamp() }).catch((err) => {
+    myPresenceRef = push(ref(rtdb, `presence/${currentLocationId}`));
+    onDisconnect(myPresenceRef).remove().catch(() => {});
+    set(myPresenceRef, {
+      account, charX: player.x, charY: player.y, updatedAtMs: serverTimestamp()
+    }).catch((err) => {
       console.error('presence set failed (non-fatal):', err.message);
     });
     lastPresenceSentAt = Date.now();
@@ -328,24 +338,20 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
 
   // Explicit, immediate leave for a cave we're walking out of (as opposed
   // to onDisconnect, which only fires if the whole connection drops) -
-  // cancels that location's onDisconnect registration too, so it doesn't
-  // sit around pointed at a node we've already removed ourselves.
-  function leavePresence(locationId) {
-    if (!account || locationId === null) return;
-    const oldRef = myPresenceRef(locationId);
-    onDisconnect(oldRef).cancel().catch(() => {});
-    remove(oldRef).catch(() => {});
+  // cancels that node's onDisconnect registration too, so it doesn't sit
+  // around pointed at a node we've already removed ourselves.
+  function leavePresence(presenceRef) {
+    if (!presenceRef) return;
+    onDisconnect(presenceRef).cancel().catch(() => {});
+    remove(presenceRef).catch(() => {});
   }
 
   function connect(id) {
-    // Leaving a cave we were actually in (not the very first connect, and
-    // not a no-op reconnect to the same id) - tear down our presence node
-    // there immediately rather than leaving it for onDisconnect, which
-    // only fires on an actual connection drop, not a location change.
-    if (previousLocationId !== null && previousLocationId !== id) {
-      leavePresence(previousLocationId);
-    }
-    previousLocationId = id;
+    // Leaving a cave we were actually in (not the very first connect) -
+    // tear down our presence node there immediately rather than leaving
+    // it for onDisconnect, which only fires on an actual connection
+    // drop, not a location change.
+    leavePresence(myPresenceRef);
 
     currentLocationId = id;
     nodes = new Map();
@@ -405,9 +411,12 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     unsubPresenceValue = onValue(presenceListRef, (snap) => {
       const val = snap.val() || {};
       const next = new Map();
-      for (const [acct, data] of Object.entries(val)) {
-        if (acct === account) continue; // never render ourselves from the broadcast
-        next.set(acct, { account: acct, ...data });
+      for (const data of Object.values(val)) {
+        // Identity comes from the `account` FIELD, not the RTDB key - the
+        // key is an opaque push() id (see armPresenceForCurrentLocation),
+        // since account names can contain '.', which RTDB keys can't.
+        if (!data || !data.account || data.account === account) continue; // skip malformed entries and our own broadcast
+        next.set(data.account, data);
       }
       otherPlayers = next;
     });
@@ -441,7 +450,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   // still to keep updatedAtMs fresh - onDisconnect, not this, is what
   // actually guarantees cleanup.
   function sendPresenceIfNeeded() {
-    if (!account) return;
+    if (!account || !myPresenceRef) return;
     const now = Date.now();
     const moved = lastPresenceX === null ||
       Math.hypot(player.x - lastPresenceX, player.y - lastPresenceY) > PRESENCE_MOVE_EPSILON;
@@ -451,8 +460,13 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     lastPresenceSentAt = now;
     lastPresenceX = player.x;
     lastPresenceY = player.y;
-    set(myPresenceRef(currentLocationId), {
-      charX: player.x, charY: player.y, updatedAtMs: serverTimestamp()
+    // set() replaces the WHOLE node, so `account` has to be re-sent every
+    // time too, not just on the initial write in
+    // armPresenceForCurrentLocation() - otherwise the second heartbeat
+    // would wipe it out from under the security rule's validation and
+    // otherPlayers' rendering.
+    set(myPresenceRef, {
+      account, charX: player.x, charY: player.y, updatedAtMs: serverTimestamp()
     }).catch((err) => {
       // Best-effort, like the mining broadcast - a dropped update just
       // means we're stale to others until the next one lands.
@@ -1123,7 +1137,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
       if (unsubMiningActivity) unsubMiningActivity();
       if (unsubPresenceValue) unsubPresenceValue();
       if (unsubConnected) unsubConnected();
-      leavePresence(currentLocationId);
+      leavePresence(myPresenceRef);
       canvas.removeEventListener('click', onCanvasClick);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);

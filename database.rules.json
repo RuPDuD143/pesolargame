@@ -11,10 +11,21 @@
   // not the Express server - there's no anti-cheat reason it has to go
   // through the backend (charX/charY are already untrusted, client-
   // reported data everywhere else in this codebase too; see mining.js's
-  // longstanding movement/anti-cheat caveat). auth.uid is only ever a WAX
-  // account name that proved key ownership via the login flow (same
-  // custom-token minting Firestore's own rules rely on), so "you can only
-  // write your own presence node" falls straight out of that.
+  // longstanding movement/anti-cheat caveat).
+  //
+  // Each presence node's key is an opaque push() id, NOT the account
+  // name - RTDB keys can't contain '.', '#', '$', '[', or ']', and WAX
+  // account names routinely contain '.' (e.g. "foo.bar.wam"). The real
+  // account name instead lives as a FIELD inside the node
+  // (mining.js's armPresenceForCurrentLocation()), so these rules check
+  // that field rather than the path when deciding who owns a node:
+  // - creating a node requires its own `account` field to equal your
+  //   Firebase Auth uid (which is only ever set to a WAX account name
+  //   that proved key ownership - see firestore.rules) - you can't claim
+  //   to be someone else.
+  // - updating or deleting an EXISTING node requires that node's current
+  //   `account` field to already be yours - you can't touch anyone
+  //   else's, including to delete it.
   "rules": {
     ".read": false,
     ".write": false,
@@ -25,11 +36,10 @@
         // lets every other client render a ghost for you.
         ".read": true,
 
-        "$account": {
-          // Only the signed-in account matching this node's key may write
-          // it - nobody can spoof another player's position.
-          ".write": "auth != null && auth.uid === $account",
-          ".validate": "newData.hasChildren(['charX', 'charY', 'updatedAtMs'])",
+        "$pushId": {
+          ".write": "auth != null && (!data.exists() || data.child('account').val() === auth.uid)",
+          ".validate": "newData.hasChildren(['account', 'charX', 'charY', 'updatedAtMs'])",
+          "account": { ".validate": "newData.isString() && newData.val() === auth.uid" },
           "charX": { ".validate": "newData.isNumber()" },
           "charY": { ".validate": "newData.isNumber()" },
           "updatedAtMs": { ".validate": "newData.isNumber()" },
