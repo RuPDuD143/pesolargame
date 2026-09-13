@@ -120,7 +120,7 @@
 //   falls back to the existing "Validating..." label at that point
 //   rather than guessing further.
 
-import { db, rtdb, apiFetch } from './firebase-config.js?v=13';
+import { db, rtdb, apiFetch } from './firebase-config.js?v=14';
 import { collection, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 import {
   ref, push, onValue, set, remove, onDisconnect, serverTimestamp
@@ -437,9 +437,31 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   // ever applied to that now-dead connection. Set up once here, not
   // per-connect() - it always targets whatever currentLocationId
   // currently is at the moment it fires.
-  unsubConnected = onValue(ref(rtdb, '.info/connected'), (snap) => {
-    if (snap.val() === true) armPresenceForCurrentLocation();
-  });
+  let everConnectedToRtdb = false;
+  unsubConnected = onValue(
+    ref(rtdb, '.info/connected'),
+    (snap) => {
+      if (snap.val() === true) {
+        everConnectedToRtdb = true;
+        armPresenceForCurrentLocation();
+      }
+    },
+    (err) => console.error('[mining] RTDB .info/connected listener errored:', err)
+  );
+  // Diagnostic - if this never logs "connected", every other player stays
+  // invisible to you no matter what (see the file header's presence
+  // section). The most common cause is public/js/firebase-config.js's
+  // databaseURL being wrong or a placeholder - go to Firebase Console ->
+  // Build -> Realtime Database, confirm a database actually exists there
+  // (not just Firestore), and copy its exact URL into that file.
+  setTimeout(() => {
+    if (!everConnectedToRtdb) {
+      console.error(
+        '[mining] Still not connected to Realtime Database after 5s - other players will not be visible. ' +
+        'Check public/js/firebase-config.js\'s databaseURL against Firebase Console -> Build -> Realtime Database.'
+      );
+    }
+  }, 5000);
 
   // Heartbeats our own position so other clients' presence listeners see
   // us move. Throttled for bandwidth/smoothness, not to dodge a write
@@ -630,46 +652,76 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   }
 
   async function onCanvasClick(e) {
-    if (spectator || !account) return; // guests can move and explore, but can't mine
+    try {
+      if (spectator || !account) return; // guests can move and explore, but can't mine
 
-    if (miningState) {
-      // Already mining - a click during an active session cancels it.
-      // Progress made so far still gets sent to the server (finalizeMining
-      // only skips the network call if literally nothing landed yet).
-      finalizeMining();
-      return;
-    }
-
-    const rect = canvas.getBoundingClientRect();
-    // canvas.width/height is the fixed internal drawing resolution (800x800),
-    // but rect.width/height is however big CSS actually renders it on screen
-    // (#world-canvas has max-width:90vmin/max-height:70vh, so on most
-    // screens it's shown smaller than 800px). Converting through the
-    // *actual* displayed size first is what makes clicks land accurately.
-    const displayToInternalX = canvas.width / rect.width;
-    const displayToInternalY = canvas.height / rect.height;
-    const canvasX = (e.clientX - rect.left) * displayToInternalX;
-    const canvasY = (e.clientY - rect.top) * displayToInternalY;
-    const clickX = camera.x + (canvasX - CANVAS_SIZE / 2) / SCALE;
-    const clickY = camera.y + (canvasY - CANVAS_SIZE / 2) / SCALE;
-
-    let target = null;
-    let bestDist = HIT_RADIUS;
-    for (const node of nodes.values()) {
-      const d = Math.hypot(node.x - clickX, node.y - clickY);
-      if (d < bestDist) {
-        bestDist = d;
-        target = node;
+      if (miningState) {
+        // Already mining - a click during an active session cancels it.
+        // Progress made so far still gets sent to the server (finalizeMining
+        // only skips the network call if literally nothing landed yet).
+        finalizeMining();
+        return;
       }
-    }
-    if (!target) return; // clicked empty ground - nothing to do
 
-    if (distanceToNode(target) > MINING_RANGE) {
-      toast('Too far to mine - get closer.');
-      return;
-    }
+      const rect = canvas.getBoundingClientRect();
+      // canvas.width/height is the fixed internal drawing resolution (800x800),
+      // but rect.width/height is however big CSS actually renders it on screen
+      // (#world-canvas has max-width:90vmin/max-height:70vh, so on most
+      // screens it's shown smaller than 800px). Converting through the
+      // *actual* displayed size first is what makes clicks land accurately.
+      const displayToInternalX = canvas.width / rect.width;
+      const displayToInternalY = canvas.height / rect.height;
+      const canvasX = (e.clientX - rect.left) * displayToInternalX;
+      const canvasY = (e.clientY - rect.top) * displayToInternalY;
+      const clickX = camera.x + (canvasX - CANVAS_SIZE / 2) / SCALE;
+      const clickY = camera.y + (canvasY - CANVAS_SIZE / 2) / SCALE;
 
-    startMining(target);
+      let target = null;
+      let bestDist = HIT_RADIUS;
+      for (const node of nodes.values()) {
+        const d = Math.hypot(node.x - clickX, node.y - clickY);
+        if (d < bestDist) {
+          bestDist = d;
+          target = node;
+        }
+      }
+      if (!target) {
+        // Temporary diagnostic - if clicks stop registering again, open
+        // DevTools (F12) -> Console right before clicking and read this
+        // line: it shows exactly where the click was interpreted to land
+        // in world space, how many nodes are known locally, and how close
+        // the single nearest one actually was. If nodesSeen is 0 despite
+        // rocks being visibly on screen, the nodes listener/render loop
+        // are looking at different data than they should be. If
+        // nearestDist is huge/NaN/way off from where you actually
+        // clicked, it's a coordinate math or camera-desync bug. Remove
+        // this whole `if (!target)` block once the click issue's confirmed
+        // fixed - it's not meant to stay long-term.
+        let nearestDist = null;
+        for (const node of nodes.values()) {
+          const d = Math.hypot(node.x - clickX, node.y - clickY);
+          if (nearestDist === null || d < nearestDist) nearestDist = d;
+        }
+        console.debug('[mining] click found no node in range', {
+          clickX, clickY, cameraX: camera.x, cameraY: camera.y,
+          nodesSeen: nodes.size, nearestDist, hitRadius: HIT_RADIUS
+        });
+        return; // clicked empty ground - nothing to do
+      }
+
+      if (distanceToNode(target) > MINING_RANGE) {
+        toast('Too far to mine - get closer.');
+        return;
+      }
+
+      startMining(target);
+    } catch (err) {
+      // Belt-and-suspenders: nothing above should throw synchronously, but
+      // if it ever does, this is what turns a silent, invisible failure
+      // into something you can actually see and report.
+      console.error('[mining] onCanvasClick threw unexpectedly:', err);
+      toast('Something went wrong trying to mine that - see console (F12).');
+    }
   }
   canvas.addEventListener('click', onCanvasClick);
 
