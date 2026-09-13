@@ -47,6 +47,18 @@ initializeApp({
   projectId: serviceAccount.project_id
 });
 const db = getFirestore();
+// Firestore's Admin SDK defaults to gRPC, which needs long-lived HTTP/2
+// streaming connections. A lot of non-Google-Cloud hosts (Render,
+// Railway, Fly.io, etc.) sit behind a proxy/load-balancer that silently
+// drops or never properly completes that kind of connection - with no
+// error on either end, just an indefinite hang. That matches exactly
+// what /startMining was doing: every await up to and including
+// miningSession.startSession()'s single Firestore .set() logged fine,
+// then nothing, forever - a plain write should never take that long on
+// its own. Forcing REST here trades a little streaming efficiency for a
+// transport that works reliably through arbitrary HTTP proxies, which is
+// the right tradeoff for a low-throughput game backend like this one.
+db.settings({ preferRest: true });
 const auth = getAuth();
 
 // [TEMPORARY] DEMO MODE - see the matching block in server/lib/node-manager.js.
