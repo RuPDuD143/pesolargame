@@ -77,9 +77,12 @@ function startRespawnSweep(db) {
  * Runs the full hourly reconcile, but only if it's actually due - checked
  * and claimed atomically so concurrent callers (the backstop loop and any
  * number of clients whose countdown just hit zero) can't double-run it.
- * Returns { ran: boolean, nextSweepAtMs: number, resources?: number }.
+ * Pass { force: true } to bypass the due-check (still does the real
+ * chain-sync + reconcile + lastSweep bump) - handy for testing without
+ * waiting an hour, or via /runSweep?force=true.
+ * Returns { ran: boolean, nextSweepAtMs: number, resources?: number, chainSynced?: boolean }.
  */
-async function runSweepIfDue(db) {
+async function runSweepIfDue(db, { force = false } = {}) {
   const sysdataRef = db.collection('sysdata').doc('main');
 
   const claim = await db.runTransaction(async (tx) => {
@@ -91,7 +94,7 @@ async function runSweepIfDue(db) {
     const lastSweepMs = sysdata.lastSweep ? sysdata.lastSweep.toMillis() : 0;
     const dueAtMs = lastSweepMs + SWEEP_INTERVAL_MS;
 
-    if (now < dueAtMs) return { due: false, dueAtMs };
+    if (!force && now < dueAtMs) return { due: false, dueAtMs };
 
     // Claim it immediately, before doing any of the (slower) chain RPC /
     // reconcile work below, so a second caller arriving a moment later
@@ -104,21 +107,34 @@ async function runSweepIfDue(db) {
     return { ran: false, nextSweepAtMs: claim.dueAtMs ?? Date.now() };
   }
 
-  // Pull the live economy number from the chain. If the RPC call fails
-  // for any reason, fall back to whatever sysdata/main.resources already
-  // said rather than aborting the whole sweep - a stale-but-known number
-  // is better than skipping node reconciliation entirely.
+  // Pull the live economy number from the chain. If the RPC call fails,
+  // or comes back with no matching row at all (wrong scope/key guess -
+  // see chain.js's comment on CONTRACT_SYSDATA_SCOPE/KEY), fall back to
+  // whatever sysdata/main.resources already said rather than aborting the
+  // whole sweep - a stale-but-known number is better than skipping node
+  // reconciliation entirely. Either case is logged clearly so a silent
+  // "resources never actually updates" isn't silent in the Render logs -
+  // hit GET /debugSysdata for the same info without waiting for a sweep.
   //
   // The contract's row field is called `treasury` (per its ABI -
   // sysdata_row = { treasury: int64 }), not `resources` - Firestore keeps
   // calling its mirror of it `resources` since that's the name the rest
   // of this codebase (computeNodeMax, etc.) already uses.
   let resources = claim.sysdata.resources;
+  let chainSynced = false;
   try {
     const row = await chain.getContractSysdata();
     if (row && row.treasury != null) {
       resources = Number(row.treasury);
       await sysdataRef.update({ resources });
+      chainSynced = true;
+      console.log(`runSweepIfDue: synced sysdata.resources = ${resources} from the contract's treasury`);
+    } else {
+      console.error(
+        'runSweepIfDue: chain returned no sysdata row - check CONTRACT_SYSDATA_TABLE/SCOPE/KEY env vars ' +
+        `(currently table=${chain.SYSDATA_TABLE}, scope=${chain.SYSDATA_SCOPE}, key=${chain.SYSDATA_KEY}). ` +
+        `Keeping existing Firestore resources value: ${resources}`
+      );
     }
   } catch (err) {
     console.error('runSweepIfDue: chain sysdata fetch failed, using existing Firestore value:', err.message);
@@ -127,7 +143,7 @@ async function runSweepIfDue(db) {
   const freshSnap = await sysdataRef.get();
   await nodeManager.reconcileAllLocations(db, freshSnap.data());
 
-  return { ran: true, nextSweepAtMs: Date.now() + SWEEP_INTERVAL_MS, resources };
+  return { ran: true, nextSweepAtMs: Date.now() + SWEEP_INTERVAL_MS, resources, chainSynced };
 }
 
 function startNodeReconcileSweep(db) {

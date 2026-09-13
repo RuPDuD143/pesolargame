@@ -92,5 +92,8 @@ module.exports = {
   getPermissionKeys,
   getAbi,
   CONTRACT_NAME,
-  RPC_ENDPOINT
+  RPC_ENDPOINT,
+  SYSDATA_TABLE,
+  SYSDATA_SCOPE,
+  SYSDATA_KEY
 };

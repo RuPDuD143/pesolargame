@@ -310,15 +310,58 @@ app.get('/seedLocations', async (req, res) => {
 // see runSweepIfDue()'s Firestore transaction for how that's enforced
 // even if several people's countdowns hit zero at once. Safe to expose
 // publicly and to call as often as the client likes; it's a cheap no-op
-// the rest of the time.
+// the rest of the time. Add ?force=true to bypass the due-check (still
+// does the real chain-sync + reconcile) for testing without waiting an hour.
 // ---------------------------------------------------------------------
 
 app.post('/runSweep', async (req, res) => {
   try {
-    const result = await runSweepIfDue(db);
+    const force = req.query.force === 'true' || (req.body && req.body.force === true);
+    const result = await runSweepIfDue(db, { force });
     res.json(result);
   } catch (err) {
     console.error('runSweep failed:', err);
+    res.status(500).json({ error: 'internal_error' });
+  }
+});
+
+// ---------------------------------------------------------------------
+// Read-only diagnostic - hit this in a browser or with curl any time to
+// see, without waiting for a sweep or digging through Render's logs:
+// what the chain RPC call for sysdata is actually returning right now,
+// what table/scope/key it's using to ask (in case CONTRACT_SYSDATA_TABLE/
+// SCOPE/KEY need adjusting), and what's currently sitting in Firestore.
+// If chainRow comes back null with no chainError, the RPC call succeeded
+// but found no row at that table/scope/key - the guessed scope/key in
+// chain.js is wrong for this contract and needs an env var override.
+// ---------------------------------------------------------------------
+
+app.get('/debugSysdata', async (req, res) => {
+  try {
+    const sysSnap = await db.collection('sysdata').doc('main').get();
+    const firestoreSysdata = sysSnap.exists ? sysSnap.data() : null;
+
+    let chainRow = null;
+    let chainError = null;
+    try {
+      chainRow = await chain.getContractSysdata();
+    } catch (err) {
+      chainError = err.message;
+    }
+
+    res.json({
+      firestoreSysdata,
+      chainRow,
+      chainError,
+      chainQuery: {
+        code: chain.CONTRACT_NAME,
+        table: chain.SYSDATA_TABLE,
+        scope: chain.SYSDATA_SCOPE,
+        key: chain.SYSDATA_KEY
+      }
+    });
+  } catch (err) {
+    console.error('debugSysdata failed:', err);
     res.status(500).json({ error: 'internal_error' });
   }
 });
