@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Pesolar - DB Debug</title>
+<meta name="robots" content="noindex, nofollow" />
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    min-height: 100%;
+    background: #0a0a0a;
+    color: #eee;
+    font-family: system-ui, sans-serif;
+  }
+
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    padding: 14px 18px;
+    background: #111;
+    border-bottom: 1px solid #333;
+  }
+
+  header h1 {
+    font-size: 1.1rem;
+    margin: 0;
+    color: #d4af37;
+    white-space: nowrap;
+  }
+
+  header .spacer { flex: 1; }
+
+  input[type="password"], input[type="text"] {
+    background: #1c1c1c;
+    border: 1px solid #444;
+    color: #eee;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    min-width: 160px;
+  }
+
+  button {
+    padding: 8px 16px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    background: #d4af37;
+    color: #111;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+  }
+
+  button.secondary {
+    background: #2a2a2a;
+    color: #eee;
+    border: 1px solid #444;
+  }
+
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  #status {
+    padding: 10px 18px;
+    font-size: 0.85rem;
+    color: #999;
+  }
+
+  #status.error { color: #ff6b6b; }
+  #status.ok { color: #7fd67f; }
+
+  #summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 18px 14px;
+  }
+
+  .chip {
+    background: #1c1c1c;
+    border: 1px solid #333;
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 0.8rem;
+    color: #ccc;
+  }
+
+  .chip b { color: #d4af37; }
+
+  main {
+    padding: 0 18px 40px;
+  }
+
+  #output {
+    background: #111;
+    border: 1px solid #292929;
+    border-radius: 8px;
+    padding: 16px;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-x: auto;
+  }
+
+  .jk { color: #7fb8ff; }   /* JSON keys */
+  .js { color: #a6e3a1; }   /* strings */
+  .jn { color: #f9c74f; }   /* numbers */
+  .jb { color: #d4af37; font-weight: 600; } /* booleans/null */
+
+  #empty-hint {
+    color: #777;
+    font-style: italic;
+    padding: 40px 0;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9878;&#65039; Pesolar &mdash; DB Debug</h1>
+  <input id="apiBase" type="text" placeholder="API base URL" />
+  <input id="debugKey" type="password" placeholder="DEBUG_KEY (if set on the server)" />
+  <div class="spacer"></div>
+  <button id="loadBtn">Load database</button>
+  <button id="downloadBtn" class="secondary" disabled>Download JSON</button>
+</header>
+
+<div id="status"></div>
+<div id="summary"></div>
+
+<main>
+  <div id="output"><div id="empty-hint">Click &ldquo;Load database&rdquo; to fetch a live snapshot.</div></div>
+</main>
+
+<script>
+(function () {
+  const DEFAULT_API_BASE = 'https://pesolargame.onrender.com';
+
+  const $apiBase = document.getElementById('apiBase');
+  const $debugKey = document.getElementById('debugKey');
+  const $loadBtn = document.getElementById('loadBtn');
+  const $downloadBtn = document.getElementById('downloadBtn');
+  const $status = document.getElementById('status');
+  const $summary = document.getElementById('summary');
+  const $output = document.getElementById('output');
+
+  // Remember the API base + key locally so you don't have to retype them
+  // every visit. Never sent anywhere except back to that same API base.
+  $apiBase.value = localStorage.getItem('pesolar_debug_apiBase') || DEFAULT_API_BASE;
+  $debugKey.value = localStorage.getItem('pesolar_debug_key') || '';
+
+  let lastPayload = null;
+
+  function setStatus(text, kind) {
+    $status.textContent = text;
+    $status.className = kind || '';
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  }
+
+  /** Minimal JSON syntax highlighter - just wraps tokens in spans, no parsing changes. */
+  function highlight(json) {
+    const escaped = escapeHtml(json);
+    return escaped.replace(
+      /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(\.\d+)?([eE][+-]?\d+)?)/g,
+      (match) => {
+        if (/^"/.test(match)) {
+          return /:$/.test(match)
+            ? `<span class="jk">${match}</span>`
+            : `<span class="js">${match}</span>`;
+        }
+        if (/true|false|null/.test(match)) return `<span class="jb">${match}</span>`;
+        return `<span class="jn">${match}</span>`;
+      }
+    );
+  }
+
+  function countDocs(node) {
+    if (!node || typeof node !== 'object') return 0;
+    let count = 0;
+    for (const value of Object.values(node)) {
+      count += 1;
+      if (value && typeof value === 'object' && value._subcollections) {
+        for (const sub of Object.values(value._subcollections)) count += countDocs(sub);
+      }
+    }
+    return count;
+  }
+
+  function renderSummary(data) {
+    $summary.innerHTML = '';
+    for (const [collectionName, docs] of Object.entries(data)) {
+      const chip = document.createElement('div');
+      chip.className = 'chip';
+      chip.innerHTML = `${collectionName}: <b>${countDocs(docs)}</b>`;
+      $summary.appendChild(chip);
+    }
+  }
+
+  async function loadDatabase() {
+    const apiBase = $apiBase.value.trim().replace(/\/$/, '');
+    const key = $debugKey.value.trim();
+    if (!apiBase) return setStatus('Enter an API base URL first.', 'error');
+
+    localStorage.setItem('pesolar_debug_apiBase', apiBase);
+    localStorage.setItem('pesolar_debug_key', key);
+
+    $loadBtn.disabled = true;
+    $downloadBtn.disabled = true;
+    setStatus('Loading\u2026');
+    $output.innerHTML = '';
+
+    try {
+      const url = new URL('/debugDump', apiBase);
+      if (key) url.searchParams.set('key', key);
+
+      const res = await fetch(url.toString());
+      const payload = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        const reason = payload.error === 'bad_or_missing_key'
+          ? 'Wrong or missing DEBUG_KEY.'
+          : (payload.error || `HTTP ${res.status}`);
+        setStatus(`Failed to load: ${reason}`, 'error');
+        $output.innerHTML = '<div id="empty-hint">Nothing loaded.</div>';
+        return;
+      }
+
+      lastPayload = payload;
+      const json = JSON.stringify(payload.data, null, 2);
+      $output.innerHTML = highlight(json);
+      renderSummary(payload.data);
+      $downloadBtn.disabled = false;
+      setStatus(`Loaded snapshot from ${new Date(payload.generatedAtMs).toLocaleString()}.`, 'ok');
+    } catch (err) {
+      setStatus(`Failed to load: ${err.message}`, 'error');
+      $output.innerHTML = '<div id="empty-hint">Nothing loaded.</div>';
+    } finally {
+      $loadBtn.disabled = false;
+    }
+  }
+
+  function downloadJson() {
+    if (!lastPayload) return;
+    const blob = new Blob([JSON.stringify(lastPayload.data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date(lastPayload.generatedAtMs).toISOString().replace(/[:.]/g, '-');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pesolar-db-dump-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  $loadBtn.addEventListener('click', loadDatabase);
+  $downloadBtn.addEventListener('click', downloadJson);
+  $debugKey.addEventListener('keydown', (e) => { if (e.key === 'Enter') loadDatabase(); });
+})();
+</script>
+
+</body>
+</html>

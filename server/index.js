@@ -21,6 +21,7 @@ const chain = require('./lib/chain');
 const { computeEnergyStatus } = require('./lib/energy');
 const { requestLoginNonce, verifyLogin } = require('./lib/verify-signature');
 const nodeManager = require('./lib/node-manager');
+const debugDump = require('./lib/debug-dump');
 const miningSession = require('./lib/mining-session');
 const { ORE_ASSET_IDS } = require('./lib/ore-asset-ids');
 const { LOCATIONS } = require('./lib/ore-config');
@@ -423,6 +424,44 @@ app.get('/debugSysdata', async (req, res) => {
     });
   } catch (err) {
     console.error('debugSysdata failed:', err);
+    res.status(500).json({ error: 'internal_error' });
+  }
+});
+
+// ---------------------------------------------------------------------
+// FULL DATABASE DUMP - backs public/debug.html's "download everything as
+// JSON" button, since Firestore's own console has no built-in JSON
+// export for a live Spark-plan project. Walks every collection,
+// document, and subcollection via the Admin SDK (see lib/debug-dump.js)
+// and returns it as one JSON blob.
+//
+// This is far more sensitive than the other /debug* endpoints above - it
+// includes every worker account's coins/energy, live mining sessions, and
+// in-flight login nonces - so it's gated behind a shared secret (the
+// DEBUG_KEY env var) rather than left wide open like /debugSysdata.
+// Set DEBUG_KEY in Render's dashboard before deploying this anywhere
+// someone else could stumble onto the URL. If DEBUG_KEY isn't set, the
+// endpoint still works (so local dev isn't blocked) but logs a loud
+// warning on every hit so it doesn't stay silently wide open.
+// ---------------------------------------------------------------------
+
+app.get('/debugDump', async (req, res) => {
+  try {
+    if (process.env.DEBUG_KEY) {
+      if (req.query.key !== process.env.DEBUG_KEY) {
+        return res.status(403).json({ error: 'bad_or_missing_key' });
+      }
+    } else {
+      console.warn(
+        '/debugDump hit with no DEBUG_KEY env var set - anyone with this URL can read the entire ' +
+        'database (accounts, coins, nonces, everything). Set DEBUG_KEY before deploying.'
+      );
+    }
+
+    const data = await debugDump.dumpDatabase(db);
+    res.json({ generatedAtMs: Date.now(), data });
+  } catch (err) {
+    console.error('debugDump failed:', err);
     res.status(500).json({ error: 'internal_error' });
   }
 });
