@@ -32,22 +32,40 @@ async function getContractWorker(accountName) {
 // Singleton row on the contract holding the live game economy (this is
 // what "resources" actually means on-chain - votes/other contract
 // actions change it, and Firestore's sysdata/main.resources is meant to
-// mirror it, not be hand-edited forever). Per the contract's ABI:
-// table "sysdata", row type "sysdata_row" = { treasury: int64 }. Scope
-// and primary key aren't specified by key_names/key_types in the ABI
-// (both empty, which just means the row's primary_key() is computed in
-// the contract's C++, not read off a named field) - scoped to the
-// contract's own account and keyed at 0 is the standard convention for a
-// single-row table like this, matching how "workers" is already scoped
-// to CONTRACT_NAME elsewhere in this file. Override via env vars if that
-// guess is wrong for this contract.
+// mirror it, not be hand-edited forever). Per the contract's ABI: table
+// "sysdata", row type "sysdata_row" = { treasury: int64 } - a bare
+// single-field struct with no primary_key() visible in the ABI, which is
+// exactly what eosio::singleton<"sysdata"_n, sysdata_row> looks like from
+// the outside (the template supplies primary_key() itself). If that's
+// what this contract uses, the row's real primary key on-chain isn't 0 -
+// it's the name "sysdata" encoded as a uint64 (14389162870375972864,
+// computed by the same base32 packing eosio.cdt's name.hpp uses).
+//
+// getContractSysdata() tries, in order: an explicit CONTRACT_SYSDATA_KEY
+// env var if set, then plain key 0, then the singleton-encoded key -
+// returning whichever first finds a row. That first-match key is logged,
+// so once you see it succeed in the logs (or via GET /debugSysdata) you
+// can pin it down permanently with CONTRACT_SYSDATA_KEY and skip the
+// extra RPC round-trips going forward.
 const SYSDATA_TABLE = process.env.CONTRACT_SYSDATA_TABLE || 'sysdata';
 const SYSDATA_SCOPE = process.env.CONTRACT_SYSDATA_SCOPE || CONTRACT_NAME;
-const SYSDATA_KEY = process.env.CONTRACT_SYSDATA_KEY || 0;
+const SYSDATA_SINGLETON_KEY = '14389162870375972864'; // name("sysdata").value
+const SYSDATA_KEY_CANDIDATES = process.env.CONTRACT_SYSDATA_KEY
+  ? [process.env.CONTRACT_SYSDATA_KEY]
+  : [0, SYSDATA_SINGLETON_KEY];
 
 /** Row shape per the contract's ABI: { treasury: int64 }. */
 async function getContractSysdata() {
-  return getTableRow({ code: CONTRACT_NAME, table: SYSDATA_TABLE, scope: SYSDATA_SCOPE, key: SYSDATA_KEY });
+  for (const key of SYSDATA_KEY_CANDIDATES) {
+    const row = await getTableRow({ code: CONTRACT_NAME, table: SYSDATA_TABLE, scope: SYSDATA_SCOPE, key });
+    if (row) {
+      if (SYSDATA_KEY_CANDIDATES.length > 1) {
+        console.log(`getContractSysdata: found the row at key=${key} - set CONTRACT_SYSDATA_KEY=${key} to skip the other candidate next time`);
+      }
+      return row;
+    }
+  }
+  return null;
 }
 
 /**
@@ -95,5 +113,5 @@ module.exports = {
   RPC_ENDPOINT,
   SYSDATA_TABLE,
   SYSDATA_SCOPE,
-  SYSDATA_KEY
+  SYSDATA_KEY_CANDIDATES
 };

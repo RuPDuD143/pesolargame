@@ -132,7 +132,7 @@ async function runSweepIfDue(db, { force = false } = {}) {
     } else {
       console.error(
         'runSweepIfDue: chain returned no sysdata row - check CONTRACT_SYSDATA_TABLE/SCOPE/KEY env vars ' +
-        `(currently table=${chain.SYSDATA_TABLE}, scope=${chain.SYSDATA_SCOPE}, key=${chain.SYSDATA_KEY}). ` +
+        `(currently table=${chain.SYSDATA_TABLE}, scope=${chain.SYSDATA_SCOPE}, tried key(s)=${chain.SYSDATA_KEY_CANDIDATES.join(', ')}). ` +
         `Keeping existing Firestore resources value: ${resources}`
       );
     }

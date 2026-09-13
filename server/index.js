@@ -325,6 +325,21 @@ app.post('/runSweep', async (req, res) => {
   }
 });
 
+// GET alias purely so you can trigger this by pasting a URL into a
+// browser address bar while testing (a plain GET is what a browser does
+// by default; the client always uses the POST above). Same handler,
+// same ?force=true support.
+app.get('/runSweep', async (req, res) => {
+  try {
+    const force = req.query.force === 'true';
+    const result = await runSweepIfDue(db, { force });
+    res.json(result);
+  } catch (err) {
+    console.error('runSweep failed:', err);
+    res.status(500).json({ error: 'internal_error' });
+  }
+});
+
 // ---------------------------------------------------------------------
 // Read-only diagnostic - hit this in a browser or with curl any time to
 // see, without waiting for a sweep or digging through Render's logs:
@@ -357,7 +372,7 @@ app.get('/debugSysdata', async (req, res) => {
         code: chain.CONTRACT_NAME,
         table: chain.SYSDATA_TABLE,
         scope: chain.SYSDATA_SCOPE,
-        key: chain.SYSDATA_KEY
+        keyCandidatesTried: chain.SYSDATA_KEY_CANDIDATES
       }
     });
   } catch (err) {
