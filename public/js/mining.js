@@ -120,8 +120,10 @@
 //   falls back to the existing "Validating..." label at that point
 //   rather than guessing further.
 
-import { db, rtdb, apiFetch, auth } from './firebase-config.js?v=14';
+import { db, rtdb, apiFetch, auth } from './firebase-config.js?v=15';
 import { collection, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
+import { recordSnapshot } from './quota-client.js?v=15';
+import { mountQuotaOverlay } from './quota-overlay.js?v=15';
 import {
   ref, push, onValue, set, remove, onDisconnect, serverTimestamp
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js';
@@ -364,6 +366,10 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
 
     const nodesRef = collection(db, 'locations', String(currentLocationId), 'nodes');
     unsubNodes = onSnapshot(nodesRef, (snap) => {
+      // Easily the most expensive listener in the game: the first callback
+      // after entering a cave delivers every one of its ~100 node docs,
+      // and that happens again on every single cave change.
+      recordSnapshot('nodes', snap);
       snap.docChanges().forEach((change) => {
         const data = change.doc.data();
         if (change.type === 'removed') {
@@ -391,6 +397,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     // finishing, without needing a full player-position sync.
     const activityRef = collection(db, 'locations', String(currentLocationId), 'miningActivity');
     unsubMiningActivity = onSnapshot(activityRef, (snap) => {
+      recordSnapshot('miningActivity', snap);
       snap.docChanges().forEach((change) => {
         if (change.doc.id === account) return; // never render our own broadcast - we draw ourselves from local state
         if (change.type === 'removed') {
@@ -496,9 +503,16 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     });
   }
 
+  const quotaOverlay = mountQuotaOverlay();
+
   function onKeyDown(e) {
     keys[e.key.toLowerCase()] = true;
     if (e.key === 'Escape' && miningState) finalizeMining();
+    if (e.key === 'F3') {
+      // preventDefault because some browsers bind F3 to "find again".
+      e.preventDefault();
+      quotaOverlay.toggle();
+    }
   }
   function onKeyUp(e) { keys[e.key.toLowerCase()] = false; }
   window.addEventListener('keydown', onKeyDown);
@@ -586,37 +600,67 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
     clampPlayerPosition();
   }
 
-  async function startMining(node) {
+  // Starts mining OPTIMISTICALLY: the character plants and the swing
+  // begins on the very frame you click, with the /startMining round trip
+  // happening in the background.
+  //
+  // This used to `await` that round trip before assigning miningState,
+  // which meant updateMovement() kept letting you walk and no pickaxe
+  // rendered until the server answered - a full network round trip to a
+  // free-tier host, i.e. the ~1s of "nothing's happening" lag. Nothing
+  // about that wait was load-bearing: the server does NOT send back
+  // anything the swing needs (it just returns {started:true}), and hits
+  // accumulate purely locally in pendingHits until finalizeMining sends
+  // the total at the end. So the wait was pure latency for zero
+  // information, and starting locally is both safe and authoritative-
+  // free: the server still independently validates range and node state
+  // on /startMining, and /mineNode re-validates everything before
+  // granting any ore. A rejected start just rolls the local state back.
+  function startMining(node) {
     console.debug('[mining] POST /startMining', {
       account, locationId: currentLocationId, nodeId: node.id, charX: player.x, charY: player.y,
       hasCurrentUser: !!auth.currentUser
     });
-    try {
-      await apiFetch('/startMining', {
-        method: 'POST',
-        authRequired: true,
-        body: { account, locationId: currentLocationId, nodeId: node.id, charX: player.x, charY: player.y }
+
+    // Identifies THIS session, so a late rejection can't tear down a
+    // newer session the player has since started on another node.
+    const token = Symbol('miningSession');
+    const request = apiFetch('/startMining', {
+      method: 'POST',
+      authRequired: true,
+      body: { account, locationId: currentLocationId, nodeId: node.id, charX: player.x, charY: player.y }
+    });
+
+    miningState = {
+      nodeId: node.id,
+      localStrikesRemaining: node.strikesRemaining,
+      pendingHits: 0,
+      orbitStartTime: performance.now(),
+      lastCompletedOrbits: 0,
+      validating: false,
+      finalizing: false,
+      token,
+      // finalizeMining awaits this before calling /mineNode, so the two
+      // requests can't arrive out of order server-side (which would make
+      // /mineNode fail with no_active_session on a session that was
+      // moments from existing).
+      startRequest: request
+    };
+
+    request
+      .then(() => {
+        console.debug('[mining] /startMining confirmed', { nodeId: node.id });
+      })
+      .catch((err) => {
+        console.error('[mining] /startMining failed:', err);
+        // Only roll back if this is still the session we started - if the
+        // player already cancelled it or moved to a different node, that
+        // newer state is the correct one and must be left alone.
+        if (miningState && miningState.token === token) {
+          miningState = null;
+          toast(err.message === 'out_of_range' ? 'Too far to mine - get closer.' : "Can't mine that right now.");
+        }
       });
-      console.debug('[mining] /startMining succeeded - swing should now be visible', { nodeId: node.id });
-      miningState = {
-        nodeId: node.id,
-        localStrikesRemaining: node.strikesRemaining,
-        pendingHits: 0,
-        orbitStartTime: performance.now(),
-        lastCompletedOrbits: 0,
-        validating: false,
-        finalizing: false
-      };
-    } catch (err) {
-      // Previously only err.message reached the toast (out_of_range vs a
-      // generic "can't mine that" catch-all) and the actual error object
-      // was discarded entirely - so an auth failure, a CORS/network error,
-      // or a 500 from the server all looked visually identical and left
-      // nothing in the console to tell them apart. Logging the raw error
-      // here is what turns "nothing happens" into an actual diagnosis.
-      console.error('[mining] /startMining failed:', err);
-      toast(err.message === 'out_of_range' ? 'Too far to mine - get closer.' : "Can't mine that right now.");
-    }
   }
 
   // Ends the current mining session, however it ended (finished, cancelled,
@@ -629,11 +673,22 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
   async function finalizeMining() {
     if (!miningState || miningState.finalizing) return;
     miningState.finalizing = true; // freezes the swing (see drawMiningPickaxe) and blocks re-entry
-    const { nodeId, pendingHits } = miningState;
+    const { nodeId, pendingHits, startRequest } = miningState;
     // Only worth a "Validating..." label if we actually have hits pending
     // for the server to confirm - an instant cancel with nothing landed
     // has nothing to validate, so just let it clear quietly.
     if (pendingHits > 0) miningState.validating = true;
+
+    // Since mining now starts optimistically (see startMining), a very
+    // fast session - click, then immediately cancel or get sniped - can
+    // reach here while /startMining is still in flight. Firing /mineNode
+    // now would race it and likely land first, hitting no_active_session
+    // against a session that was about to exist. Waiting for the start to
+    // settle keeps the two calls correctly ordered. A rejected start is
+    // fine to swallow here: its own .catch already reported it, and the
+    // /mineNode call below will simply report no_active_session, which is
+    // already handled silently.
+    if (startRequest) await startRequest.catch(() => {});
 
     try {
       const result = await apiFetch('/mineNode', {
@@ -1212,6 +1267,7 @@ export function mountMine({ canvas, toastEl, account, locationId, spectator = fa
       if (unsubPresenceValue) unsubPresenceValue();
       if (unsubConnected) unsubConnected();
       leavePresence(myPresenceRef);
+      quotaOverlay.destroy();
       canvas.removeEventListener('click', onCanvasClick);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);

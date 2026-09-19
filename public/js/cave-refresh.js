@@ -15,8 +15,9 @@
 // itself, it just has to ask, and the server's response feeds back into
 // resetting/holding the countdown correctly either way.
 
-import { db, apiFetch } from './firebase-config.js?v=14';
+import { db, apiFetch } from './firebase-config.js?v=15';
 import { doc, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
+import { recordReads } from './quota-client.js?v=15';
 
 // Must match server/lib/respawn-sweep.js's SWEEP_HOURS - there's no
 // runtime way to share this constant across the client/server boundary
@@ -42,6 +43,7 @@ export function mountCaveRefreshCountdown({ labelEl }) {
 
   const sysdataRef = doc(db, 'sysdata', 'main');
   const unsub = onSnapshot(sysdataRef, (snap) => {
+    recordReads('sysdata', 1); // one doc per callback - see quota-client.js
     const data = snap.data();
     if (!data || !data.lastSweep) {
       // Never swept yet - due immediately, matching runSweepIfDue()'s own

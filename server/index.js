@@ -26,6 +26,13 @@ const miningSession = require('./lib/mining-session');
 const { ORE_ASSET_IDS } = require('./lib/ore-asset-ids');
 const { LOCATIONS } = require('./lib/ore-config');
 const { startRespawnSweep, startNodeReconcileSweep, runSweepIfDue } = require('./lib/respawn-sweep');
+const quotaMeter = require('./lib/quota-meter');
+
+// Installed before initializeApp/getFirestore below so that literally
+// every Firestore operation this process performs is counted, including
+// ones issued during startup. See lib/quota-meter.js for what this can
+// and can't see.
+quotaMeter.install();
 
 // ---------------------------------------------------------------------
 // Firebase Admin init - reads the FULL service account JSON from an env
@@ -466,6 +473,17 @@ app.get('/debugSysdata', async (req, res) => {
     console.error('debugSysdata failed:', err);
     res.status(500).json({ error: 'internal_error' });
   }
+});
+
+// ---------------------------------------------------------------------
+// QUOTA METER - backs the in-game F3 overlay. Deliberately NOT gated
+// behind DEBUG_KEY like /debugDump below: it exposes no user data at
+// all (just operation counts for this process), and the browser overlay
+// has nowhere safe to keep a secret anyway.
+// ---------------------------------------------------------------------
+
+app.get('/debugQuota', (req, res) => {
+  res.json(quotaMeter.snapshot());
 });
 
 // ---------------------------------------------------------------------
