@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>PESOLAR — Solar Farm</title>
+<title>Pesolar Game - Stake n' Take</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,800&family=Instrument+Sans:wght@400;600&display=swap" rel="stylesheet">
 <style>
@@ -162,7 +162,7 @@ body.landmode #dock>*{pointer-events:none}
 </section>
 <section id="shopUI" class="card cpop" role="dialog" aria-modal="true" aria-labelledby="shopTitle" hidden>
   <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><h3 id="shopTitle">Get points</h3><button class="btn ghost" id="shopClose" aria-label="Close">✕ Close</button></div>
-  <div class="note" id="pointsNote"><b>Points can't be withdrawn.</b> They're game fuel: you stake them to capture lands, and you get most of them back when you claim. What the lands earn is <b>PESOLAR</b>, which you can keep, send, sell or lock. Points just give you the advantage of capturing lands and earning more PESOLAR. You can still sell points to other players for PESOLAR (10% of the points you put up are burned as a fee).</div>
+  <div class="note" id="pointsNote"><b>Points can't be withdrawn back to Wax, but you can sell them to other players for PESOLAR.</b> A 10% fee on the points you list is burned when you sell. Points are used to capture lands: if you hold a land for 24 hours, you get back about 40-90% of your bid (the higher the bid, the fewer the points you get back). If someone outbids you, you get your bid back plus at least 4 points. What the lands earn is <b>PESOLAR</b>, which you can keep, send, sell or lock. Having more points lets you capture more lands and earn more PESOLAR.</div>  
   <div class="tabs"><button class="btn" id="shopTabWax" data-shop="wax">With WAX</button><button class="btn ghost" id="shopTabPes" data-shop="pes">With PESOLAR</button><button class="btn ghost" id="shopTabSell" data-shop="sell">Sell points</button></div>
   <div id="shopWax">
     <input id="waxIn" type="number" min="1" step="1" placeholder="maximum: 0 WAX">
