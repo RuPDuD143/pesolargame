@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>PESOLAR — Solar Farm</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,800&family=Instrument+Sans:wght@400;600&display=swap" rel="stylesheet">
+<style>
+#regBtn,#unregBtn{margin:6px 6px 0 0}
+:root{--o-none:#8a97a6;--o-mine:#3da5ff;--o-ready:#3ddc84;--o-other:#ff9f1a;--night:#0b1d33;--panel:#12365a;--cell:#1b4f82;--sun:#ffb400;--frost:#e6f2ff;--ember:#ff5a36;--mute:#7f9bb8;--line:#2a557f}
+*{box-sizing:border-box}
+html,body{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;height:100%;overflow:hidden;margin:0;background:radial-gradient(1200px 600px at 80% -10%,#1d4a7a 0,var(--night) 60%) fixed;color:var(--frost);font:15px/1.5 "Instrument Sans",system-ui,sans-serif}
+h1,h2,h3,.num{font-family:"Bricolage Grotesque",sans-serif;margin:0}
+button{font:inherit;cursor:pointer}
+:focus-visible{outline:3px solid var(--sun);outline-offset:2px}
+.btn{background:var(--sun);color:#2a1c00;border:0;border-radius:10px;padding:10px 16px;font-weight:600}
+.btn.ghost{background:transparent;color:var(--frost);border:1px solid var(--line)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.farm{display:grid;grid-template-columns:repeat(9,88px);gap:6px;background:#0a1828;padding:10px;border-radius:18px;border:1px solid var(--line);width:max-content}
+.tile{position:relative;width:88px;height:88px;border-radius:6px;border:3px solid var(--tc,var(--o-none));--c1:var(--cell);--c2:var(--panel);background:linear-gradient(135deg,var(--c1),var(--c2));padding:0;overflow:hidden;color:var(--frost)}
+.tile::before{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent 48%,#ffffff22 49% 51%,transparent 52%),linear-gradient(0deg,transparent 48%,#ffffff22 49% 51%,transparent 52%)}
+.tile .fill{position:absolute;left:0;right:0;bottom:0;background:linear-gradient(0deg,var(--fc,#ff9f1acc),#0000);transition:height .6s}
+.tile small{position:absolute;left:3px;top:2px;font-size:10px;color:#fff9;z-index:1}
+.tile.none{--tc:var(--o-none)}
+.tile.none,.tile.other{--fc:#ff9f1acc}.tile.mine{--fc:#3da5ffcc}
+.tile.mine{--tc:var(--o-mine)}
+.tile.ready{--tc:var(--o-ready)}
+.tile.other{--tc:var(--o-other)}
+.tile.sel{outline:3px solid var(--frost);z-index:2}
+.tile .ti{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;text-align:center;line-height:1.05;pointer-events:none;z-index:1;color:#fff;text-shadow:0 1px 3px #000,0 0 6px #000;font-family:"Bricolage Grotesque",sans-serif}
+.tile .ti b{font-size:20px;font-weight:700}.tile .ti u{text-decoration:none;font-size:8px;letter-spacing:.14em;opacity:.9}
+.tile .ti i.tm{font-style:normal;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+.sect{border-top:1px solid var(--line);padding:10px 0 4px;margin-top:10px}.sect:first-of-type{border-top:0;margin-top:0}
+.nlist{overflow:auto;flex:1;margin:6px 0 10px;padding-right:6px;max-height:55vh}.nsum{margin:0 0 12px;line-height:1.4}
+.bcards{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.bcard{flex:1 1 210px;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;cursor:pointer;color:inherit;font:inherit}
+.bcard.sel{outline:2px solid var(--frost)}.bcard b{display:block;font-family:"Bricolage Grotesque",sans-serif;font-size:16px;margin:4px 0 2px}.bcard small{display:block;color:var(--mute);line-height:1.35}
+.bcard .tag{display:inline-block;font-size:11px;border-radius:999px;padding:1px 9px;border:1px solid var(--line)}
+.t-open{color:#7fe3a0;border-color:#2c7a50!important}.t-closed{color:#f5b86a;border-color:#8a5a1f!important}.t-new{color:#8ec5ff;border-color:#2f5f94!important}.t-paid{color:var(--mute)}
+.sublabel{color:var(--mute);font-size:13px;margin:-2px 0 8px}
+.tile.msel{box-shadow:inset 0 0 0 2px #7fe3a0,0 0 16px 3px rgba(127,227,160,.55);animation:wob .55s ease-in-out infinite alternate;z-index:2}
+@keyframes wob{from{transform:rotate(-1.4deg)}to{transform:rotate(1.4deg)}}
+@media (prefers-reduced-motion:reduce){.tile.msel{animation:none}}
+body.bulkdim #stage::before{opacity:1}
+body.bulkdim .tile:not(.elig){filter:brightness(.3)}
+.tile.elig{box-shadow:inset 0 0 0 2px #7fe3a0,0 0 18px 4px rgba(127,227,160,.7)}
+#bulkBar{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);z-index:45;display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:8px 12px;box-shadow:0 10px 30px #000a;max-width:96vw}
+#bulkBar span{color:var(--mute);margin-right:4px}
+#bulkUI{position:fixed;left:50%;top:50%;width:min(520px,94vw);max-height:90vh;overflow:auto;z-index:110;box-shadow:0 20px 60px #000a}
+.brow{display:grid;grid-template-columns:84px 1fr auto;gap:8px;align-items:center;margin:6px 0}.brow input{margin:0}
+.bulkscroll{max-height:45vh;overflow:auto;margin:8px 0}.chk{display:flex;gap:8px;align-items:center;margin:6px 0}.chk input{width:auto;margin:0}.lockedline b{color:var(--frost)}
+.tile.ready{animation:pulse 1.6s infinite}
+@keyframes pulse{50%{box-shadow:0 0 14px 2px var(--o-ready)}}
+@media(prefers-reduced-motion:reduce){.tile.ready{animation:none;box-shadow:0 0 10px var(--o-ready)}*{transition:none!important}}
+.card{background:var(--panel);border-radius:16px;padding:16px;border:1px solid var(--line)}
+.card h3{font-size:20px;margin-bottom:8px}
+.row{display:flex;justify-content:space-between;gap:8px;padding:3px 0;color:var(--mute)}.row b{color:var(--frost);font-weight:600}
+input,textarea{-webkit-user-select:text;user-select:text}
+input{width:100%;background:var(--night);border:1px solid var(--line);color:var(--frost);border-radius:10px;padding:10px;font:inherit;margin:6px 0}
+.tabs{display:flex;gap:6px;margin-bottom:8px}.tabs button{flex:1}
+.hint{color:var(--mute);font-size:13px;margin:6px 0 0}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--frost);color:var(--night);padding:12px 18px;border-radius:12px;font-weight:600;max-width:90vw;display:none;z-index:200}
+#toast.err{background:var(--ember);color:#fff}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#ff3b30;margin-left:6px;vertical-align:middle}
+.nitem{border-top:1px solid var(--line);padding:8px 0}.nitem b{display:block}.nitem small{color:var(--mute)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;list-style:none;padding:0;margin:10px 0 0;color:var(--mute);font-size:13px}.legend i{display:inline-block;width:14px;height:14px;border-radius:4px;border:3px solid var(--c);vertical-align:-2px;margin-right:6px}
+ol{margin:0;padding-left:20px}
+#stage{position:fixed;inset:0;touch-action:none;cursor:grab;overflow:hidden}#stage:active{cursor:grabbing}
+#world{position:absolute;left:0;top:0;z-index:1;transform-origin:0 0}
+#hud{position:fixed;top:12px;right:12px;z-index:30;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px)}
+#who{display:flex;gap:8px;align-items:center;background:#0b1d33cc;padding:6px 8px;border-radius:14px;border:1px solid var(--line);backdrop-filter:blur(6px)}
+#notifCard{width:min(440px,calc(100vw - 24px));max-height:85vh;overflow:hidden;display:flex;flex-direction:column}#notifCard[hidden]{display:none}
+#dock{position:fixed;left:12px;right:12px;bottom:12px;z-index:15;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:flex-end;justify-content:space-between;pointer-events:none}#dock>*{pointer-events:auto}
+.pills{display:flex;gap:8px;flex-wrap:wrap}.pill{background:#0b1d33cc;border:1px solid var(--line);border-radius:12px;padding:6px 12px;backdrop-filter:blur(6px)}.pill b{font-family:"Bricolage Grotesque";font-size:20px;margin-right:4px}
+#info{position:fixed;z-index:40;top:0;right:0;width:50vw;height:100%;overflow:auto;padding:64px 24px 24px;background:linear-gradient(180deg,#0f2c4c,#0b1d33);border-left:1px solid var(--line);transform:translateX(100%);transition:transform .45s cubic-bezier(.2,.8,.2,1);display:flex;flex-direction:column;gap:16px}
+#info.open{transform:none}
+#closeInfo{position:absolute;top:12px;left:16px}
+@media(max-width:799px){#info{top:50%;width:100%;height:50%;padding-top:56px;border-left:0;border-top:1px solid var(--line);transform:translateY(100%)}#info.open{transform:none}}
+#who:empty{display:none}#menuCard{width:min(300px,calc(100vw - 24px));display:flex;flex-direction:column;gap:8px}
+.warn{background:#3a1f12;border:1px solid var(--o-other);border-radius:10px;padding:10px;margin:8px 0;font-size:14px}.warn .btn{margin-top:8px}
+[hidden]{display:none!important}
+#menuWrap{position:fixed;top:12px;left:12px;z-index:30;display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+#legend{margin-left:auto!important;flex-direction:column;flex-wrap:nowrap;gap:6px;margin:0;padding:8px 12px;background:#0b1d33cc;border:1px solid var(--line);border-radius:12px;backdrop-filter:blur(6px)}
+#legend li{display:flex;justify-content:flex-end;align-items:center}#legend i{margin:0 0 0 8px}
+#menuBtn{background:var(--panel);color:var(--frost);border:1px solid var(--o-mine);font-size:22px;line-height:1;padding:8px 14px;box-shadow:0 2px 10px #0008}
+.ptsrow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:6px 0}.ptsrow b{font-family:"Bricolage Grotesque";font-size:20px}
+#dim{position:fixed;inset:0;z-index:100;background:rgba(2,6,14,.76);opacity:0;pointer-events:none;transition:opacity .25s}#dim.on{opacity:1;pointer-events:auto}
+.lit{z-index:105!important}
+#stakeUI{position:fixed;left:50%;top:50%;width:80vw;height:80vh;z-index:110;display:flex;flex-direction:column;background:linear-gradient(180deg,#0f2c4c,#0b1d33);border:1px solid var(--line);border-radius:18px;box-shadow:0 20px 60px #000a;overflow:hidden}
+@media(max-width:799px){#stakeUI{width:90vw;height:90vh}}
+.sk-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:14px 18px;border-bottom:1px solid var(--line)}
+.sk-tabs{display:flex;gap:6px;padding:10px 18px 0}
+.sk-body{flex:1;overflow:auto;padding:14px 18px 18px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}.stat span{display:block;color:var(--mute);font-size:13px}.stat b{font-family:"Bricolage Grotesque",sans-serif;font-size:20px}
+table.sk{width:100%;border-collapse:collapse;min-width:480px}.sk th,.sk td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+.sk th{position:sticky;top:0;background:#0f2c4c;color:var(--mute);font-size:13px;font-weight:600}.sk td small{color:var(--mute)}.sk tr.me{background:#1b4f8266}
+#confirm{position:fixed;left:50%;top:50%;width:min(460px,92vw);max-height:90vh;overflow:auto;z-index:120;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;box-shadow:0 20px 60px #000b}
+#confirm p{margin:8px 0}.note{background:#0f2c4c;border:1px solid var(--o-mine);border-radius:10px;padding:10px 12px;margin:10px 0;font-size:14px}
+a.btn{display:inline-block;text-decoration:none}
+/* open / close animations */
+.pop{opacity:0;transform:translateY(-10px) scale(.96);transform-origin:top left;transition:opacity .22s ease,transform .25s cubic-bezier(.2,.8,.2,1);pointer-events:none}
+.pop.open{opacity:1;transform:none;pointer-events:auto}
+#hud .pop{transform-origin:top right}
+.cpop{opacity:0;transform:translate(-50%,-46%) scale(.96);transition:opacity .22s ease,transform .25s cubic-bezier(.2,.8,.2,1);pointer-events:none}
+.cpop.open{opacity:1;transform:translate(-50%,-50%);pointer-events:auto}
+/* land mode: everything but the chosen land and its panel is darkened */
+#stage::before{content:"";position:absolute;inset:0;background:rgba(2,6,14,.8);opacity:0;transition:opacity .35s;pointer-events:none}
+body.landmode #stage::before{opacity:1}
+.tile,#menuWrap,#hud,#dock{transition:filter .35s}
+body.landmode .tile:not(.sel){filter:brightness(.3)}
+body.landmode .farm{border-color:#13263a}
+body.landmode #menuWrap,body.landmode #hud,body.landmode #dock{filter:brightness(.3);pointer-events:none}
+body.landmode #dock>*{pointer-events:none}
+.need{color:var(--ember);font-size:13px;margin:0 0 6px}.need:empty{display:none}.need a{color:var(--ember);text-decoration:underline;cursor:pointer}
+.stat small{display:block;color:var(--mute);font-size:14px;font-variant-numeric:tabular-nums}
+#shopUI{position:fixed;left:50%;top:50%;width:min(440px,92vw);max-height:90vh;overflow:auto;z-index:110;box-shadow:0 20px 60px #000a}
+#menuCard h4{margin:6px 0 0;font-family:"Bricolage Grotesque",sans-serif;font-size:16px}#menuCard ol{font-size:14px;color:var(--mute)}
+.spin{display:inline-block;width:.85em;height:.85em;border:2px solid var(--mute);border-top-color:var(--sun);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-.12em}@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="stage"><div id="world"><div class="farm" id="farm" role="grid" aria-label="81 solar lands"></div></div></div>
+<div id="hud"><div id="who"></div><div class="card pop" id="notifCard" hidden></div></div>
+<div id="menuWrap"><button class="btn ghost" id="menuBtn" aria-label="Menu">☰</button><div class="card pop" id="menuCard" hidden></div></div>
+<div id="dock">
+  <ul class="legend" id="legend"><li>No owner<i style="--c:var(--o-none)"></i></li><li>Yours<i style="--c:var(--o-mine)"></i></li><li>Someone else's<i style="--c:var(--o-other)"></i></li></ul>
+  <span class="hint" id="demoNote"></span>
+</div>
+<aside id="info">
+  <button class="btn ghost" id="closeInfo" aria-label="Close">✕ Close</button>
+  <div class="card" id="landCard" hidden></div>
+</aside>
+<div id="bulkBar" hidden><span id="bulkCount"></span><button class="btn" id="bulkRes" data-bulk="res">Bulk reserve</button><button class="btn" id="bulkCap" data-bulk="cap">Bulk capture</button><button class="btn" id="bulkRem" data-bulk="rem">Bulk remove reservation</button><button class="btn ghost" id="bulkClear">Clear</button></div>
+<section id="bulkUI" class="card cpop" role="dialog" aria-modal="true" hidden></section>
+<div id="dim"></div>
+<section id="stakeUI" class="cpop" role="dialog" aria-modal="true" aria-labelledby="stakeTitle" hidden>
+  <div class="sk-head"><h2 id="stakeTitle">Stake PESOLAR</h2><button class="btn ghost" id="stakeClose" aria-label="Close">✕ Close</button></div>
+  <div class="sk-tabs" role="tablist"><button class="btn" id="tabStake" data-stab="stake" role="tab">Stakers</button><a class="btn ghost" id="tabSwap" href="https://alcor.exchange/v/wax/swap/wax-eosio.token_pesolar-pesolargame1" target="_blank" rel="noopener">Get more PESOLAR ↗</a></div>
+  <div class="sk-body">
+    <div id="stakePane">
+      <div id="boardCards" class="bcards" aria-label="Boards"></div>
+      <div class="stats">
+        <div class="stat"><span>Points pool</span><b id="pPool">–</b><small id="pNext"></small></div>
+        <div class="stat"><span>Locked until</span><b id="myUntil">–</b><small id="pCount" aria-label="Time left, days hours minutes seconds"></small></div>
+        <div class="stat"><span>Your estimate</span><b id="myEst">–</b><small id="myEstSub"></small></div>
+      </div>
+      <p class="hint">Lock PESOLAR to share a board's reward pool in proportion to what you lock. Locked PESOLAR can't be sent until the board's payout date. Unlocking early frees it but gives up your share. A board only takes new PESOLAR during the half-month it starts in (days 1-15 or 16-end), so it can't be joined at the last minute. You can have one lock in each board, but the same PESOLAR can't be locked in two boards. Once the payout date passes, claim your share within a year (unlocking then claims it for you).</p>
+      <div class="row"><span>Status</span><b id="myReg">–</b></div>
+      <div class="sublabel" id="myLocked">total locked: 0.00 PESOLAR</div>
+      <p class="hint" id="lockTarget" style="margin:8px 0 6px"></p>
+      <input id="regIn" type="number" min="1" step="1" placeholder="maximum: 0.00 PESOLAR">
+      <div id="lockErr" class="need"></div>
+      <button class="btn" id="regBtn">Lock PESOLAR</button> <button class="btn ghost" id="unregBtn">Unlock PESOLAR</button>
+      <button class="btn" id="claimPtsBtn" hidden style="margin-top:8px">Claim my share</button>
+      <p class="hint" style="margin:8px 0 0">Unlock any time. You only skip this board's payout.</p>
+      <h3 style="margin-top:20px" id="stakersTitle">Stakers</h3>
+      <div style="overflow:auto"><table class="sk"><thead><tr><th>Name</th><th>PESOLAR locked</th><th>Share</th><th title="Estimated points. Everyone's share is rounded down; the leftover points go to first place.">Est. point price</th></tr></thead><tbody id="stakerRows"></tbody></table></div>
+    </div>
+  </div>
+</section>
+<section id="shopUI" class="card cpop" role="dialog" aria-modal="true" aria-labelledby="shopTitle" hidden>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><h3 id="shopTitle">Get points</h3><button class="btn ghost" id="shopClose" aria-label="Close">✕ Close</button></div>
+  <div class="note" id="pointsNote"><b>Points can't be withdrawn.</b> They're game fuel: you stake them to capture lands, and you get most of them back when you claim. What the lands earn is <b>PESOLAR</b>, which you can keep, send, sell or lock. Points just give you the advantage of capturing lands and earning more PESOLAR. You can still sell points to other players for PESOLAR (10% of the points you put up are burned as a fee).</div>
+  <div class="tabs"><button class="btn" id="shopTabWax" data-shop="wax">With WAX</button><button class="btn ghost" id="shopTabPes" data-shop="pes">With PESOLAR</button><button class="btn ghost" id="shopTabSell" data-shop="sell">Sell points</button></div>
+  <div id="shopWax">
+    <input id="waxIn" type="number" min="1" step="1" placeholder="maximum: 0 WAX">
+    <button class="btn" id="buyWaxBtn">Buy points with WAX</button>
+  </div>
+  <div id="shopPes" hidden>
+    <div class="row"><span>Available PESOLAR</span><b id="pesHave">–</b></div>
+    <input id="pesIn" type="number" min="1" step="1" placeholder="maximum: 0 points">
+    <div id="pesCost" class="hint"></div><div id="pesParts" class="hint"></div><div id="pesErr" class="need" hidden></div>
+    <button class="btn" id="buyPesBtn" disabled>Buy points with PESOLAR</button>
+    <p class="hint">Orders from other players are used first, cheapest first; the game sells the rest at 100 PESOLAR per point. If you send more than the points cost, the change comes back. Locked PESOLAR can't be spent. Need more PESOLAR? <a href="https://alcor.exchange/v/wax/swap/wax-eosio.token_pesolar-pesolargame1" target="_blank" rel="noopener" style="color:var(--frost)">Swap on Alcor ↗</a></p>
+  </div>
+  <div id="shopSell" hidden>
+    <div id="sellBook" class="hint"></div>
+    <div id="sellNew">
+      <p class="hint">Sell points to other players for PESOLAR. 10% of what you put up is a fee in points that is burned. The lowest prices sell first; the game itself sells at 100 PESOLAR per point, so your price can be anything from 0.000001 to 100. You can have one sell order.</p>
+      <input id="sellPts" type="number" min="1" step="1" placeholder="Points to sell (before the fee)">
+      <input id="sellCost" type="number" min="0.000001" max="100" step="any" placeholder="PESOLAR per point (0.000001 to 100)">
+      <div id="sellInfo" class="hint"></div><div id="sellErr" class="need"></div>
+      <button class="btn" id="sellBtn" disabled>Put points on sale</button>
+    </div>
+    <div id="sellHave" hidden>
+      <div class="row"><span>Points for sale</span><b id="osStock">–</b></div>
+      <div class="row"><span>Price per point</span><b id="osCost">–</b></div>
+      <div class="row"><span>Earnings waiting</span><b id="osPend">–</b></div>
+      <button class="btn" id="claimEarnBtn">Claim earnings</button>
+      <input id="osNewCost" type="number" min="0.000001" max="100" step="any" placeholder="New price (0.000001 to 100)"><button class="btn ghost" id="editCostBtn">Change price</button>
+      <input id="osMore" type="number" min="1" step="1" placeholder="Points to add (before the fee)"><div id="osMoreInfo" class="hint"></div><div id="osMoreErr" class="need"></div><button class="btn ghost" id="stackBtn">Add points</button>
+      <button class="btn ghost" id="removeOrderBtn">Remove order</button>
+    </div>
+  </div>
+</section>
+<div id="confirm" class="cpop" role="alertdialog" aria-modal="true" aria-labelledby="cfTitle" hidden>
+  <h3 id="cfTitle"></h3><div id="cfBody"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn ghost" id="cfNo">Cancel</button><button class="btn" id="cfYes">Confirm</button></div>
+</div>
+<div id="toast" role="status"></div>
+
+<script type="module">
+import {SessionKit, Chains} from "https://esm.sh/@wharfkit/session@1";
+import {WebRenderer} from "https://esm.sh/@wharfkit/web-renderer@1";
+import {WalletPluginAnchor} from "https://esm.sh/@wharfkit/wallet-plugin-anchor@1";
+import {WalletPluginCloudWallet} from "https://esm.sh/@wharfkit/wallet-plugin-cloudwallet@1";
+
+const CONTRACT="pesolargame1", RPC="https://wax.greymass.com", DAY=86400000;
+const $=id=>document.getElementById(id);
+let session=null, lands=[], player={points:0}, boards=[], bankP=0, myRegs=[], myPes=0, sel=null, demo=false, stakeOpen=false, stakers=[], sbSel=null, supplyP=0, priceWAX=0, priceAt=0, booted=false;
+
+const kit=new SessionKit({
+  appName:"PESOLAR Farm",
+  chains:[{id:Chains.WAX.id,url:RPC}],
+  ui:new WebRenderer(),
+  walletPlugins:[new WalletPluginCloudWallet(),new WalletPluginAnchor()]
+});
+
+/* ---------- helpers ---------- */
+function toast(msg,err){const t=$("toast");t.textContent=msg;t.className=err?"err":"";t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",4500)}
+const fmt=n=>Number(n).toLocaleString();
+const fmt2=n=>Number(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtN=n=>n>=100?fmt(Math.round(n)):n>=1?String(Number(n.toFixed(2))):String(Number(n.toPrecision(2)));
+const dateStr=ms=>new Date(ms).toLocaleDateString(undefined,{year:"numeric",month:"short",day:"numeric"})+" (00:00 UTC)";
+const hue=s=>{let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))%360;return h};
+const parseTime=v=>{if(!v)return 0;if(typeof v==="number")return v*1000;return new Date(/Z|\+/.test(v)?v:v+"Z").getTime()||0};
+async function rows(table,extra={}){
+  const r=await fetch(RPC+"/v1/chain/get_table_rows",{method:"POST",body:JSON.stringify({json:true,code:CONTRACT,scope:CONTRACT,table,limit:200,...extra})});
+  if(!r.ok)throw new Error("rpc");return (await r.json()).rows;
+}
+async function allRows(table){let out=[],key="";for(let i=0;i<20;i++){const r=await fetch(RPC+"/v1/chain/get_table_rows",{method:"POST",body:JSON.stringify({json:true,code:CONTRACT,scope:CONTRACT,table,limit:500,...(key?{lower_bound:key}:{})})});if(!r.ok)throw new Error("rpc");const j=await r.json();out=out.concat(j.rows);if(!j.more)break;key=j.next_key}return out}
+async function getPrice(){   // WAX per 1 PESOLAR, from the Alcor pool
+  if(priceWAX&&Date.now()-priceAt<60000)return priceWAX;
+  try{const j=await (await fetch("https://wax.alcor.exchange/api/v2/swap/pools/12454")).json();
+    const p=j.tokenB&&j.tokenB.symbol==="PESOLAR"?+j.priceB:+j.priceA;if(p>0){priceWAX=p;priceAt=Date.now()}}catch{}
+  return priceWAX}
+const withTimeout=(p,ms)=>Promise.race([p,new Promise(r=>setTimeout(()=>r(0),ms))]);
+/* dimming: everything is darkened except the open window and the windows that opened it */
+const layers=[];
+function refreshDim(){const lit=new Set(layers.flatMap(l=>l.lit));document.querySelectorAll(".lit").forEach(e=>{if(!lit.has(e))e.classList.remove("lit")});lit.forEach(e=>e.classList.add("lit"));$("dim").classList.toggle("on",layers.length>0)}
+function setOpen(el,on){clearTimeout(el._t);if(on){if(el.hidden){el.hidden=false;void el.offsetWidth}el.classList.add("open")}else if(!el.hidden){el.classList.remove("open");el._t=setTimeout(()=>{el.hidden=true},260)}}
+const popLayer=name=>{const i=layers.findIndex(l=>l.name===name);if(i>=0)layers.splice(i,1);refreshDim()};
+const pushLayer=(name,lit,close)=>{popLayer(name);layers.push({name,lit,close});refreshDim()};
+const closeTop=()=>{const l=layers[layers.length-1];if(l){l.close();return true}return false};
+let cfDone=null,cfTok=0;
+function confirmBox({title,html,ok="Confirm",cancel="Cancel",lit=[]}){
+  return new Promise(res=>{$("cfTitle").textContent=title;$("cfBody").innerHTML=html;$("cfYes").textContent=ok;$("cfNo").textContent=cancel;setOpen($("confirm"),true);pushLayer("confirm",lit,()=>cfDone&&cfDone(false));$("cfYes").focus();
+    cfDone=v=>{cfDone=null;setOpen($("confirm"),false);popLayer("confirm");res(v)}})}
+function setMenu(on){if(menuOpen===on)return;menuOpen=on;if(on){setNotif(false);if(sel!==null)overview();pushLayer("menu",[$("menuWrap")],()=>setMenu(false))}else popLayer("menu");render()}
+function setNotif(on,force){if(notifOpen===on)return;if(!on&&!force&&notifMustAck())return;notifOpen=on;if(on){setMenu(false);if(sel!==null)overview();pushLayer("notif",[$("hud")],()=>setNotif(false))}else popLayer("notif");render()}
+const bulkElig={
+  cap:l=>{const o=shownOwner(l),me=session?String(session.actor):"";return (o!=="none"&&o!==me)||(o==="none"&&shownRes(l)>0)},   // someone else's land, or a vacant land that holds resources
+  res:l=>shownOwner(l)==="none"&&shownRes(l)===0,                                                                                   // vacant and empty
+  rem:l=>!!session&&shownOwner(l)===String(session.actor)&&l.resources===0};                                                       // my own reservation
+const selLands=()=>[...multi].sort((a,b)=>a-b).map(id=>lands.find(l=>l.landid===id)).filter(Boolean);
+const eligFor=k=>selLands().filter(bulkElig[k]);
+function bulkBar(){const bar=$("bulkBar");bar.hidden=!selMode;if(!selMode)return;
+  $("bulkCount").textContent=`${multi.size} land${multi.size>1?"s":""} selected`;
+  for(const [k,id,label] of [["res","bulkRes","Bulk reserve"],["cap","bulkCap","Bulk capture"],["rem","bulkRem","Bulk remove reservation"]]){const n=eligFor(k).length;$(id).textContent=`${label} (${n})`;$(id).disabled=!session||n===0}}
+function setHover(k){hoverKind=k;document.body.classList.toggle("bulkdim",!!k);   // dim everything except the selected lands this action can use
+  document.querySelectorAll("#farm .tile").forEach(el=>{const id=+el.dataset.id,l=lands.find(x=>x.landid===id);el.classList.toggle("elig",!!k&&multi.has(id)&&!!l&&bulkElig[k](l))})}
+function toggleMulti(id){if(multi.has(id))multi.delete(id);else multi.add(id);if(!multi.size){selMode=false;setHover(null)}render();if(bulkKind)renderBulk()}
+function clearMulti(){multi.clear();selMode=false;setHover(null);render()}
+function openBulk(k){bulkKind=k;bulkVals={};setHover(null);renderBulk();setOpen($("bulkUI"),true);pushLayer("bulk",[],closeBulk)}
+function closeBulk(){bulkKind=null;setOpen($("bulkUI"),false);popLayer("bulk")}
+function renderBulk(){
+  const k=bulkKind;if(!k)return;const ls=eligFor(k);if(!ls.length){closeBulk();return}
+  const title={cap:"Bulk capture",res:"Bulk reserve",rem:"Bulk remove reservation"}[k];
+  const rowsHtml=ls.map((l,i)=>{
+    if(k==="rem"){const left=l.lc+DAY-Date.now(),ok=left<=0;return `<div class="brow"><span>Land #${l.landid}</span><b>${ok?`${fmt(l.chargeback)} points`:`in ${hms(left)}`}</b><button class="btn ghost" data-unsel="${l.landid}">Unselect</button></div>`}
+    const min=captureMin(l),v=bulkVals[l.landid]!==undefined?bulkVals[l.landid]:String(min),dis=k==="res"&&bulkSame&&i>0;
+    return `<div class="brow"><span>Land #${l.landid}</span><input type="number" min="${min}" step="1" data-b="${l.landid}" data-min="${min}" value="${v}" placeholder="minimum: ${fmt(min)}" ${dis?"disabled":""}><button class="btn ghost" data-unsel="${l.landid}">Unselect</button></div>`}).join("");
+  $("bulkUI").innerHTML=`<h3>${title}</h3>`+(k==="res"?`<label class="chk"><input type="checkbox" id="bulkSame" ${bulkSame?"checked":""}> same points</label>`:"")+(k==="rem"?`<div class="brow" style="opacity:.7"><span></span><small>points you get back</small><span></span></div>`:"")+`<div class="bulkscroll">${rowsHtml}</div><div id="bulkSum" class="hint"></div><div id="bulkMsg" class="need"></div><button class="btn" id="bulkGo">${{cap:"Capture",res:"Reserve",rem:"Remove reservation"}[k]}</button>`;
+  bulkRefresh()}
+function bulkRefresh(){const k=bulkKind;if(!k||!$("bulkGo"))return;
+  if(k==="rem"){const all=eligFor("rem"),n=all.filter(l=>l.lc+DAY-Date.now()<=0).length;$("bulkSum").textContent=n?`${n} of ${all.length} can be removed now.`:"None of these can be removed yet (24 hours after reserving).";$("bulkGo").disabled=!session||!n;return}
+  const ins=[...$("bulkUI").querySelectorAll("input[data-b]")];
+  if(k==="res"&&bulkSame&&ins.length){const first=ins[0].value;ins.forEach((el,i)=>{if(i>0)el.value=first})}
+  let total=0,bad=false;ins.forEach(el=>{const v=el.value,n=Math.floor(+v),min=+el.dataset.min;bulkVals[el.dataset.b]=v;if(!v||!(n>=min)||String(n)!==String(+v))bad=true;total+=n>0?n:0});
+  const have=player.points||0;
+  $("bulkSum").textContent=`Total: ${fmt(total)} points · you have ${fmt(have)}`;
+  $("bulkMsg").textContent=bad?"Every land needs a whole number of points, at least its minimum.":(total>have?`You don't have ${fmt(total)} points.`:"");
+  $("bulkGo").disabled=!session||bad||total>have}
+function setShopTab(t){$("shopWax").hidden=t!=="wax";$("shopPes").hidden=t!=="pes";$("shopSell").hidden=t!=="sell";
+  for(const [k,id] of [["wax","shopTabWax"],["pes","shopTabPes"],["sell","shopTabSell"]])$(id).className="btn"+(t===k?"":" ghost");
+  if(t==="pes")pesCost();if(t==="sell")sellPanel()}
+const feeFor=p=>Math.ceil(p/10);   // 10% of what leaves your balance, rounded up (at least 1 point)
+const rawC=v=>Math.round((+v||0)*1e6), okC=r=>r>=1&&r<=1e8;   // prices are typed in PESOLAR (up to 6 decimals) and sent as raw units
+const fmtP6=n=>Number(n.toFixed(6)).toLocaleString(undefined,{maximumFractionDigits:6});
+const pesStr=raw=>`${Math.floor(raw/1e6)}.${String(raw%1e6).padStart(6,"0")} PESOLAR`;
+const sortedOrders=()=>orders.filter(o=>o.stock>0).sort((a,b)=>a.cost-b.cost||a.created-b.created||(a.name<b.name?-1:a.name>b.name?1:0));
+function buyPlan(n){   // same order as the contract: cheapest sell orders first (oldest first at the same price), then the game at 100
+  const parts=[];let left=n,raw=0;
+  for(const o of sortedOrders()){if(left<=0)break;const take=Math.min(o.stock,left);parts.push({who:o.name,pts:take,cost:o.cost/1e6});raw+=take*o.cost;left-=take}
+  if(left>0){parts.push({who:"the game",pts:left,cost:100});raw+=left*100e6}
+  return {raw,cost:raw/1e6,parts}}
+function maxPointsFor(rawAvail){let left=rawAvail,pts=0;   // the most points rawAvail PESOLAR can buy
+  for(const o of sortedOrders()){const take=Math.min(o.stock,Math.floor(left/o.cost));pts+=take;left-=take*o.cost;if(take<o.stock)return pts}
+  return pts+Math.floor(left/100e6)}
+function shopMax(){const st=myState(),availRaw=Math.max(0,myPesRaw-st.lockedRaw),w=Math.floor(+$("waxIn").value)||0,mw=Math.floor(myWaxRaw/1e8);
+  $("waxIn").placeholder=`maximum: ${fmt(mw)} WAX`;$("pesIn").placeholder=`maximum: ${fmt(maxPointsFor(availRaw))} points`;$("buyWaxBtn").disabled=!session||w<1||w>mw}
+function pesCost(){const st=myState(),availRaw=Math.max(0,myPesRaw-st.lockedRaw),n=Math.floor(+$("pesIn").value)||0,pl=n?buyPlan(n):{raw:0,cost:0,parts:[]};
+  $("pesHave").textContent=fmt2(availRaw/1e6)+" PESOLAR";
+  $("pesCost").textContent=n?`${fmt(n)} point${n>1?"s":""} cost ${fmtP6(pl.cost)} PESOLAR`:"";
+  $("pesParts").textContent=n?pl.parts.map(p=>`${fmt(p.pts)} from ${p.who} at ${fmtP6(p.cost)}`).join(", "):"";
+  $("pesErr").hidden=!(n&&pl.raw>availRaw);$("pesErr").textContent=`You only have ${fmt2(availRaw/1e6)} PESOLAR available.`;$("buyPesBtn").disabled=!session||!n||pl.raw>availRaw;shopMax()}
+function sellPanel(){
+  const me=session?String(session.actor):"",mine=orders.find(o=>o.name===me),have=player.points||0;
+  const book=sortedOrders().slice(0,5);
+  $("sellBook").textContent="Cheapest orders now: "+(book.length?book.map(o=>`${fmt(o.stock)} points at ${fmtP6(o.cost/1e6)} (${o.name})`).join(", ")+", then the game at 100.":"none yet, so the game sells at 100.");
+  $("sellNew").hidden=!!mine;$("sellHave").hidden=!mine;
+  const lines=p=>p?`10% fee: ${fmt(feeFor(p))} points<br>what will be put up for sale: ${fmt(Math.max(0,p-feeFor(p)))} points`:"";
+  if(!mine){const p=Math.floor(+$("sellPts").value)||0,cv=$("sellCost").value,c=rawC(cv),sale=p-feeFor(p);
+    $("sellInfo").innerHTML=lines(p);
+    $("sellErr").textContent=p&&p>have?`You need ${fmt(p)} points and you have ${fmt(have)}.`:(p&&sale<1?"Too few points: nothing would be left after the 10% fee.":(cv&&!okC(c)?"The price must be between 0.000001 and 100 PESOLAR per point.":""));
+    $("sellBtn").disabled=!session||p<1||sale<1||p>have||!okC(c)}
+  else{$("osStock").textContent=fmt(mine.stock)+" points";$("osCost").textContent=fmtP6(mine.cost/1e6)+" PESOLAR";$("osPend").textContent=fmtP6(mine.pending/1e6)+" PESOLAR";
+    $("claimEarnBtn").disabled=!mine.pending;
+    const m=Math.floor(+$("osMore").value)||0,sale=m-feeFor(m);$("osMoreInfo").innerHTML=lines(m);
+    $("osMoreErr").textContent=m&&m>have?`You need ${fmt(m)} points and you have ${fmt(have)}.`:(m&&sale<1?"Too few points: nothing would be left after the 10% fee.":"");
+    $("stackBtn").disabled=m<1||sale<1||m>have;
+    $("editCostBtn").disabled=!okC(rawC($("osNewCost").value))}
+}
+function openShop(){shopOpen=true;load();setMenu(false);setNotif(false);if(sel!==null)overview();setShopTab("wax");setOpen($("shopUI"),true);pushLayer("shop",[],closeShop)}
+function closeShop(){shopOpen=false;setOpen($("shopUI"),false);popLayer("shop")}
+function openStake(){stakeOpen=true;sbSel=null;regTouched=false;setMenu(false);setOpen($("stakeUI"),true);pushLayer("stake",[],closeStake);render();load()}
+function closeStake(){stakeOpen=false;setOpen($("stakeUI"),false);popLayer("stake")}
+let cdTarget=0,cdPrefix="";const pad2=n=>String(n).padStart(2,"0");
+function tickCount(){const el=$("pCount");if(!el)return;if(!cdTarget){el.textContent="";return}const x=Math.floor((cdTarget-Date.now())/1000);
+  el.textContent=x<0?"Payout due":cdPrefix+`${pad2(Math.floor(x/86400))}:${pad2(Math.floor(x%86400/3600))}:${pad2(Math.floor(x%3600/60))}:${pad2(x%60)}`}
+setInterval(()=>{if(stakeOpen)tickCount();tickTiles()},1000);
+function tickTiles(){
+  document.querySelectorAll(".tm").forEach(el=>{const lc=+el.dataset.lc;el.textContent=+el.dataset.res===0?"reserved":hms(lc+DAY-Date.now())});
+  const b=$("unresBtn"),l=sel!==null&&lands.find(x=>x.landid===sel);
+  if(b&&l){const left=l.lc+DAY-Date.now();b.disabled=left>0;const h=$("unresHint");if(h)h.textContent=left>0?`You can remove it in ${hms(left)}.`:"Your points come back when you remove it."}
+}
+function calcEst(reward,list){   // list: [{n,l}] stakers still locked on a board. Everyone is rounded down; the leftover goes to first place
+  const L=list.reduce((s,r)=>s+BigInt(r.l),0n),R=BigInt(reward);
+  const out=list.map(r=>({n:r.n,l:r.l,base:L?Number(R*BigInt(r.l)/L):0,first:false,tie:false,bonus:0}));
+  if(!out.length)return out;
+  const top=Math.max(...out.map(o=>o.l)),firsts=out.filter(o=>o.l===top),dust=Number(R)-out.reduce((s,o)=>s+o.base,0);
+  firsts.forEach(o=>{o.first=true;o.tie=firsts.length>1;o.bonus=dust});
+  out.forEach(o=>o.est=o.base+(o.first&&!o.tie?dust:0));
+  return out}
+// state of my registration against the boards
+function windowEnd(now){const d=new Date(now),y=d.getUTCFullYear(),m=d.getUTCMonth();return d.getUTCDate()<=15?Date.UTC(y,m,16):Date.UTC(y,m+1,1)}   // the joining window closes at the end of the 15th / of the month
+const shortDate=ms=>new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric",timeZone:"UTC"});
+function rowState(r){const now=Date.now(),YEAR=365*864e5,b=boards.find(x=>x.id===String(r.board_id)),forf=!!+r.forfeit,stale=!b||now>b.payout+YEAR,fin=!!b&&now>b.payout&&!stale;
+  return {r,b,id:String(r.board_id),forf,stale,fin,running:!stale&&!fin,locked:+r.locked/1e6}}
+function myState(){const now=Date.now(),rows=myRegs.map(rowState).filter(x=>!x.stale),active=boards.find(b=>b.payout===nextPayoutMs(now))||null,   // active = the board that takes new PESOLAR today
+  onWin=active?(rows.find(x=>x.id===active.id)||null):null,lockedNow=rows.filter(x=>x.running&&!x.forf).reduce((t,x)=>t+x.locked,0),
+  lockedRaw=rows.filter(x=>x.running&&!x.forf).reduce((t,x)=>t+Number(x.r.locked),0);
+  return {now,rows,active,onWin,lockedNow,lockedRaw}}
+function boardCards(){
+  const now=Date.now(),st=myState(),win=nextPayoutMs(now),cards=[];
+  boards.filter(b=>b.payout>=now||st.rows.some(x=>x.id===b.id)).sort((a,b)=>a.payout-b.payout).forEach(b=>{
+    const paid=b.payout<now,isWin=b.payout===win,row=st.rows.find(x=>x.id===b.id)||null;
+    cards.push({key:b.id,b,row,mine:!!row,win:isWin,paid,cls:paid?"paid":isWin?"open":"closed",status:paid?"Paid out":isWin?`Open for new PESOLAR until ${shortDate(windowEnd(now)-1)}`:"Closed to new PESOLAR"})});
+  if(!cards.some(c=>c.win))cards.push({key:"new",b:null,row:null,mine:false,win:true,paid:false,cls:"new",status:"Not started yet"});
+  return cards}
+function boardSel(){const cards=boardCards(),pick=cards.find(c=>c.key===sbSel)||cards.find(c=>c.win&&c.row)||cards.find(c=>c.row&&!c.row.forf)||cards.find(c=>c.win)||cards[0]||null;
+  return {cards,pick,show:pick&&pick.b?pick.b:null,isNew:!!pick&&!pick.b,row:pick&&pick.row?pick.row:null}}
+function nextPayoutMs(now){const d=new Date(now),day=d.getUTCDate();let y=d.getUTCFullYear(),m=d.getUTCMonth()+1;if(m>11){m=0;y++}let td=day<=15?15:30;
+  if(td===30&&m===1)td=((y%4===0&&y%100!==0)||y%400===0)?29:28;return Date.UTC(y,m,td)}
+// A land owned for 24h+ looks vacant to everyone (its owner is paid by the contract / via the bell).
+const isExpired=l=>l.owner!=="none"&&l.lc>0&&l.resources>0&&Date.now()-l.lc>=DAY;   // an owned land with no resources is a reservation: it never expires
+const hms=ms=>{const x=Math.max(0,Math.floor(ms/1000));return `${String(Math.floor(x/3600)).padStart(2,"0")}:${String(Math.floor(x%3600/60)).padStart(2,"0")}:${String(x%60).padStart(2,"0")}`};
+const tmText=l=>shownOwner(l)==="none"?"":l.resources===0?"reserved":hms(l.lc+DAY-Date.now());
+const fmtP=r=>Number((r/10).toFixed(1)).toLocaleString();
+const tileInfo=l=>{const own=shownOwner(l)!=="none",r=shownRes(l);if(!own&&r===0)return"";
+  return `<span class="ti"><b>${fmtP(r)}</b><u>PESOLAR</u>${own?`<i class="tm" data-lc="${l.lc}" data-res="${l.resources}">${tmText(l)}</i>`:""}</span>`};
+const dtStr=ms=>{const d=new Date(ms);return d.toLocaleDateString(undefined,{year:"numeric",month:"short",day:"numeric"})+", "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})};
+const shownOwner=l=>isExpired(l)?"none":l.owner;
+const shownRes=l=>isExpired(l)?0:l.resources;
+const claimable=l=>session&&l.owner===String(session.actor)&&isExpired(l);
+const captureMin=l=>shownOwner(l)==="none"?100:Math.max(l.points+10,100);
+// 40% of the premium goes to the previous owner (on top of their bid back), 40% to chargeback, rest to the bank
+const prevGets=(l,p)=>shownOwner(l)==="none"?0:l.points+Math.floor(Math.max(0,p-l.points)*4/10);
+const newChargeback=(l,p)=>shownOwner(l)==="none"?90+Math.floor(Math.max(0,p-100)*4/10):l.chargeback+Math.floor(Math.max(0,p-l.points)*4/10);
+let orders=[],multi=new Set(),selMode=false,bulkKind=null,hoverKind=null,bulkVals={},bulkSame=true,regTouched=false,lpTimer=null,myWaxRaw=0,myPesRaw=0,lastLand=null,notifs=[],notifOpen=false,menuOpen=false,shopOpen=false,pending=null,drag=null,dragged=false,view={x:0,y:0,s:1};
+const T=88,STEP=94,WORLD=9*STEP+14,TILE_FRAC=0.2,world=$("world");   // on the map, each tile is TILE_FRAC x the average of the screen width and height
+
+const applyView=(anim,ms=550)=>{world.style.transition=anim?`transform ${ms}ms cubic-bezier(.2,.8,.2,1)`:"none";world.style.transform=`translate(${view.x}px,${view.y}px) scale(${view.s})`};
+function focusLand(id){sel=id;setMenu(false);setNotif(false);const i=id-1,c=i%9,r=Math.floor(i/9),mob=innerWidth<800;
+  const size=mob?Math.min(innerHeight/2*.8,innerWidth*.9):Math.min(innerWidth/2*.8,innerHeight*.9),s=size/T;   // tile = 80% of half the screen
+  const cx=mob?innerWidth/2:innerWidth/4,cy=mob?innerHeight/4:innerHeight/2;
+  view={s,x:cx-s*(10+c*STEP+T/2),y:cy-s*(10+r*STEP+T/2)};applyView(true);render()}
+function overview(ms){if(sel!==null)lastLand=sel;sel=null;const s=TILE_FRAC*((innerWidth+innerHeight)/2)/T;
+  if(lastLand!==null){const i=lastLand-1,c=i%9,r=Math.floor(i/9);   // zoom out with the land you were on in the middle of the screen
+    view={s,x:innerWidth/2-s*(10+c*STEP+T/2),y:innerHeight/2-s*(10+r*STEP+T/2)}}
+  else view={s,x:(innerWidth-WORLD*s)/2,y:(innerHeight-WORLD*s)/2};
+  applyView(true,ms);render()}
+// show a captured land immediately; keep it until the chain tables catch up (or 40s)
+function applyPending(){if(!pending)return;const l=lands.find(x=>x.landid===pending.id);
+  if(!l||Date.now()>pending.until||(l.owner===pending.patch.owner&&l.points===pending.patch.points)){pending=null;return}
+  Object.assign(l,pending.patch);player={...player,points:pending.pp}}
+const poll=()=>[1500,3000,5000,8000,12000,20000].forEach(ms=>setTimeout(load,ms));
+
+/* ---------- data ---------- */
+async function load(){
+  try{
+    const [l,m,bk]=await Promise.all([rows("lands"),rows("pointspool"),rows("bank")]);
+    if(l.length<81)throw new Error("empty");
+    lands=l.sort((a,b)=>a.landid-b.landid);
+    lands.forEach(x=>{x.owner=x.owner||"none";x.points=+x.points;x.resources=+x.resources;x.chargeback=+x.chargeback||0;x.lc=parseTime(x.last_claimed);});  // empty name = unowned
+    boards=m.map(b=>({id:String(b.board_id),reward:+b.reward_pool,locked:+b.pesolar_locked,payout:parseTime(b.payout)})).sort((a,b)=>a.payout-b.payout);bankP=bk[0]?+bk[0].pending_rewards:0;
+    if(shopOpen){try{orders=(await allRows("sellorders")).map(o=>({name:o.name,stock:+o.point_stock,cost:+o.cost,pending:+o.pending_pesolar,created:parseTime(o.created_on)}))}catch{orders=[]}}
+    if(stakeOpen){stakers=await allRows("registrants");
+      supplyP=0}
+    if(session){const p=(await rows("playerdata")).find(x=>x.account===String(session.actor));player=p||{points:0};
+      notifs=(await rows("notifs",{reverse:true})).filter(n=>n.name===String(session.actor)&&!(n.title==="You won the bid war!"&&/You received\s+0?\s*PESOLAR/.test(n.description||"")));
+      const me=String(session.actor);myRegs=(await rows("registrants",{lower_bound:me,key_type:"name",limit:16})).filter(x=>x.name===me);   // one row per board I locked into
+      const rawAmt=(t,d)=>{const m=/^(\d+)(?:\.(\d+))?/.exec(t||"");return m?Number(m[1])*10**d+Number((m[2]||"").padEnd(d,"0").slice(0,d)):0};
+      try{const b=await (await fetch(RPC+"/v1/chain/get_currency_balance",{method:"POST",body:JSON.stringify({code:CONTRACT,account:me,symbol:"PESOLAR"})})).json();myPesRaw=rawAmt(b[0],6);myPes=myPesRaw/1e6}catch{myPesRaw=0;myPes=0}
+      try{const b=await (await fetch(RPC+"/v1/chain/get_currency_balance",{method:"POST",body:JSON.stringify({code:"eosio.token",account:me,symbol:"WAX"})})).json();myWaxRaw=rawAmt(b[0],8)}catch{myWaxRaw=0}
+    }else{notifs=[];myRegs=[];myPes=0;myPesRaw=0;myWaxRaw=0}
+    demo=false;
+  }catch(e){
+    demo=true;
+    if(!lands.length)lands=Array.from({length:81},(_,i)=>({landid:i+1,points:i%4?0:100+i,chargeback:i%4?0:90,owner:i%4?"none":(i%8?"farmer"+i%5:(session?String(session.actor):"demo")),resources:(i*37)%900,last_claimed:0,lc:0}));
+  }
+  $("demoNote").textContent=demo?"(Demo data — contract tables not found yet.)":"";
+  applyPending();
+  render();
+}
+
+/* ---------- render ---------- */
+function render(){
+  const me=session?String(session.actor):"", max=Math.max(1,...lands.map(shownRes));
+  $("farm").innerHTML=lands.map(l=>{
+    const o=shownOwner(l), state=o==="none"?"none":o===me?"mine":"other";
+    const cls=["tile",state,l.landid===sel?"sel":"",multi.has(l.landid)?"msel":""].join(" ");
+    return `<button class="${cls}" data-id="${l.landid}" aria-label="Land ${l.landid}, ${state==="none"?"no owner":state==="mine"?"yours":"owned by "+o}"><small>${l.landid}</small>${tileInfo(l)}<div class="fill" style="height:${Math.round(shownRes(l)/max*100)}%"></div></button>`}).join("");
+  bulkBar();if(hoverKind)setHover(hoverKind);
+  const mine=lands.filter(l=>shownOwner(l)===me);
+  const tally={};lands.forEach(l=>{const o=shownOwner(l);if(o!=="none")tally[o]=(tally[o]||0)+1});
+  const topHtml=Object.entries(tally).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([n,c])=>`<li>${n} — ${c} lands</li>`).join("")||"<li>No owners yet. Capture the first land.</li>";
+  const nCount=lands.filter(claimable).length+notifs.length;
+  $("who").innerHTML=session?`<button class="btn ghost" id="bellBtn" aria-label="Notifications">🔔${nCount?'<i class="dot"></i>':""}</button>`:"";
+  setOpen($("menuCard"),menuOpen);
+  $("menuCard").innerHTML=session?`<h3>${session.actor}</h3><div>Owned: ${mine.length}</div><div class="hint" style="margin:0">(${lands.filter(claimable).length} ready to claim)</div><div class="ptsrow"><b>${fmt(player.points||0)} points</b><button class="btn" id="menuPts">Get points</button></div><button class="btn" id="stakeBtn">STAKE PESOLAR</button><button class="btn ghost" id="logoutBtn">Log out</button>`:`<h3>Welcome</h3><button class="btn" id="loginBtn">Log in with WAX wallet</button><button class="btn" id="stakeBtn">STAKE PESOLAR</button>`;
+  $("menuCard").insertAdjacentHTML("beforeend",`<h4>Top farmers</h4><ol>${topHtml}</ol>`);
+  $("info").classList.toggle("open",sel!==null);$("landCard").hidden=sel===null;document.body.classList.toggle("landmode",sel!==null);if(shopOpen){pesCost();sellPanel()}
+  landCard();notifPanel();poolPanel();
+}
+
+const fmt1=n=>Number(n.toFixed(1)).toLocaleString();
+function landCard(){
+  const l=lands.find(x=>x.landid===sel),c=$("landCard");
+  if(!l||document.activeElement?.id==="capIn"){return}
+  const o=shownOwner(l),mine=session&&o===String(session.actor),min=captureMin(l),none=o==="none",empty=shownRes(l)===0;
+  const res=`<div class="row"><span>Resources</span><b>${fmt1(shownRes(l)/10)} PESOLAR</b></div>`;
+  if(mine){const reserved=l.resources===0,left=l.lc+DAY-Date.now();
+    c.innerHTML=`<h3>Land #${l.landid}${reserved?" <small>reserved</small>":""}</h3><div class="sect">${res}<div class="row"><span>Owner</span><b>${o} (you)</b></div><div class="row"><span>Your stake</span><b>${fmt(l.points)} points</b></div>`+
+      (reserved?`<div class="row"><span>Points you get back if you remove the reservation</span><b>${fmt(l.chargeback)}</b></div>`:"")+`</div>`+
+      (reserved?`<div class="sect"><button class="btn ghost" id="unresBtn" ${left>0?"disabled":""}>Remove reservation</button><div class="hint" id="unresHint">${left>0?`You can remove it in ${hms(left)}.`:"Your points come back when you remove it."}</div></div>`:"");return}
+  c.innerHTML=`<h3>Land #${l.landid}</h3><div class="sect">${res}`+(none?"":`<div class="row"><span>Owner</span><b>${o}</b></div><div class="row"><span>Their stake</span><b>${fmt(l.points)} points</b></div>`)+`</div>
+    <div class="sect"><div class="row"><span>Your points</span><b>${fmt(player.points||0)}</b></div></div>
+    <div class="sect"><input id="capIn" type="number" min="${min}" value="${min}" placeholder="minimum: ${fmt(min)}" aria-label="Your stake (minimum ${min} points)">
+    <div id="needPts" class="need"></div>
+    <div class="row"><span>Points you get back if you ${empty?"remove the reservation":"win"}</span><b id="capCb">${fmt(newChargeback(l,min))}</b></div>
+    <button class="btn" id="capBtn" ${session?"":"disabled"}>Reserve this spot</button>${session?"":'<p class="hint">Log in to capture.</p>'}</div>`;
+  checkPts();
+}
+function checkPts(){
+  const b=$("capBtn"),n=$("needPts"),l=lands.find(x=>x.landid===sel);if(!b||!n||!session||!l)return;
+  const min=captureMin(l),p=+$("capIn").value||0,have=player.points||0;
+  n.innerHTML=p>have?`You don't have ${fmt(p)} points, <a href="#" data-act="getpts">Get more points</a>.`:p<min?`The minimum stake is ${fmt(min)} points.`:"";
+  b.disabled=p>have||p<min;
+}
+const notifMustAck=()=>!!session&&(notifs.length>0||lands.some(claimable));
+function notifItems(){
+  const out=[];
+  lands.filter(claimable).forEach(l=>out.push({pending:1,t:l.lc+DAY,html:`On ${dtStr(l.lc+DAY)}, you successfully captured and held Land ${l.landid} for 24 hours. You'll get some of the points you spent back (${fmt(l.chargeback)}), plus the ${fmt1(l.resources/10)} PESOLAR the land held. <b>It has not been rewarded to you yet.</b>`}));
+  notifs.forEach(n=>{const when=dtStr(parseTime(n.time)),d=n.description||"";let m;
+    if(n.title==="You won the bid war!"&&(m=/Land #(\d+) ended\. You received\s+(\d+(?:\.\d+)?)?\s*PESOLAR and\s+(\d+)?\s*points/.exec(d)))
+      out.push({t:parseTime(n.time),html:`On ${when}, you successfully captured and held Land ${m[1]} for 24 hours. You got some of the points you spent back (${fmt(m[3]||0)}), plus the ${fmt1(+(m[2]||0))} PESOLAR the land held. <b>Both have already been rewarded to you.</b>`});
+    else if(n.title==="You were outbid"&&(m=/Land #(\d+) was captured\. You received\s+(\d+)/.exec(d)))
+      out.push({t:parseTime(n.time),html:`On ${when}, someone captured a land you owned (Land ${m[1]}). What you spent for this land has been given back to you in full, plus a bonus for the trouble: <b>${fmt(m[2])} points</b> in total. <b>It has already been returned to you.</b>`});
+    else out.push({t:parseTime(n.time),html:`On ${when}: ${n.title}. ${d}`})});
+  return out.sort((a,b)=>(b.pending||0)-(a.pending||0)||b.t-a.t)}
+function notifPanel(){
+  const c=$("notifCard"); setOpen(c,notifOpen); if(!notifOpen)return;
+  const items=notifItems(),cl=lands.filter(claimable);
+  c.innerHTML=`<h3>Notifications</h3>`+(items.length?`<div class="nlist">${items.map(i=>`<p class="nsum">${i.html}</p>`).join("")}</div><button class="btn" id="ackBtn">${cl.length?"Acknowledge, claim, and close":"Acknowledge and close"}</button>`:`<p class="hint">Nothing new.</p><button class="btn ghost" id="ackBtn">Close</button>`);
+}
+
+function poolPanel(){
+  const st=myState(),{cards,pick,show,isNew,row}=boardSel(),nowMs=Date.now(),winMs=nextPayoutMs(nowMs),winBoard=st.active;
+  $("boardCards").innerHTML=cards.map(c=>`<button class="bcard${pick&&c.key===pick.key?" sel":""}" data-board="${c.key}"><span class="tag t-${c.cls}">${c.status}</span><b>Pays out ${shortDate(c.b?c.b.payout:winMs)}</b><small>${c.b?`${fmt(c.b.reward)} points in the pool · ${fmt(c.b.locked/1e6)} PESOLAR locked`:`Starts with the first lock. Its pool begins at ${fmt(bankP)} points.`}${c.row?` · <u>your lock: ${fmt(c.row.locked)} PESOLAR${c.row.forf?" (unlocked early)":""}</u>`:""}</small></button>`).join("");
+  const cur=st.onWin&&!st.onWin.forf?st.onWin.locked:0,forfWin=!!(st.onWin&&st.onWin.forf),avail=Math.max(0,myPesRaw-st.lockedRaw)/1e6,elsewhere=Math.max(0,st.lockedNow-cur);
+  $("lockTarget").textContent=(!session?"Log in to lock PESOLAR.":forfWin?`You unlocked early from the ${shortDate(winMs)} board, so you can't lock into it again. You can lock into the next board once the next half-month starts.`:winBoard?`Locking into the ${shortDate(winMs)} board (open until ${shortDate(windowEnd(nowMs)-1)}). Its pool is ${fmt(winBoard.reward)} points.${cur?` You have ${fmt(cur)} PESOLAR in it now; the box adds to that.`:""}`:`No board has started for this half-month yet. Your lock starts the ${shortDate(winMs)} board, and its pool starts at ${fmt(bankP)} points.`)+(session&&elsewhere?` You also have ${fmt(elsewhere)} PESOLAR locked in other boards (the same PESOLAR can't be locked twice).`:"");
+  $("stakersTitle").textContent=show?`Stakers on the ${shortDate(show.payout)} board`:"Stakers on the new board";
+  const until=row&&row.running&&!row.forf?show.payout:0;
+  $("myLocked").textContent=`total locked: ${fmt2(st.lockedNow)} PESOLAR`;
+  $("regIn").placeholder=`maximum: ${fmt2(avail)} PESOLAR`;
+  $("pPool").textContent=show?fmt(show.reward)+" points":isNew?fmt(bankP)+" points":"No board yet";
+  $("pNext").textContent=isNew?"Starts with the first lock":`Up next: ${fmt(bankP)} points`;
+  $("myUntil").textContent=until?dateStr(until):"–";
+  cdTarget=until||(show?show.payout:isNew?winMs:0);cdPrefix=until?"":"Payout in ";tickCount();
+  $("myReg").textContent=!row?"No lock on this board":row.forf?(row.fin?"Unlocked early: nothing to claim":"Unlocked early (left this board)"):row.fin?"Paid out: claim your share":`Locked: ${fmt(row.locked)} PESOLAR`;
+  if(stakeOpen&&!regTouched&&document.activeElement!==$("regIn")){const mx=Math.floor(avail);$("regIn").value=mx>=1?String(mx):""}   // the box starts at the most you can stake
+  const add=Math.floor(+$("regIn").value)||0;
+  $("lockErr").textContent=add>avail?`You only have ${fmt(avail)} PESOLAR available.`:"";
+  $("regBtn").disabled=!session||forfWin||add<1||add>avail;
+  $("unregBtn").disabled=!row||(row.forf&&!row.fin);
+  $("claimPtsBtn").hidden=!(row&&row.fin&&!row.forf);
+  $("regBtn").textContent=cur?"Add to lock":"Lock PESOLAR";
+  $("unregBtn").textContent=!row?"Unlock PESOLAR":(row.fin&&!row.forf)?"Claim (unlock)":(row.forf&&row.fin)?"Remove this old lock":"Unlock early";
+  if(!stakeOpen)return;
+  const me=session?String(session.actor):"";
+  { const mine2=show&&row&&!row.forf?calcEst(show.reward,stakers.filter(r=>String(r.board_id)===show.id&&!+r.forfeit).map(r=>({n:r.name,l:+r.locked}))).find(o=>o.n===me):null;
+    $("myEst").textContent=mine2?`≈ ${fmt(mine2.tie?mine2.base:mine2.est)} points`:"–";
+    $("myEstSub").textContent=mine2?`${(show.locked?mine2.l/show.locked*100:0).toFixed(1)}% of the pool`:""; }
+  const list=show?stakers.filter(r=>String(r.board_id)===show.id&&!+r.forfeit).map(r=>({n:r.name,l:+r.locked})).sort((a,b)=>b.l-a.l):[];
+  const est=calcEst(show?show.reward:0,list);
+  $("stakerRows").innerHTML=list.length?est.map(o=>{const share=show.locked?o.l/show.locked:0,
+    cell=o.tie?`${fmt(o.base)} points${o.bonus?` <small>(+${fmt(o.bonus)} leftover to whoever claims first)</small>`:""}`:`${fmt(o.est)} points${o.first&&o.bonus?` <small>(${fmt(o.base)} + ${fmt(o.bonus)} leftover)</small>`:""}`;
+    return `<tr class="${o.n===me?"me":""}"><td>${o.first?"🥇 ":""}${o.n}${o.n===me?" (you)":""}</td><td>${fmt(o.l/1e6)}</td><td>${(share*100).toFixed(2)}%</td><td>${cell}</td></tr>`}).join(""):
+    `<tr><td colspan="4" class="hint">${show?"Nobody has locked PESOLAR on this board yet.":"Nobody has locked yet. Your lock starts this board."}</td></tr>`;
+}
+
+/* ---------- chain actions ---------- */
+async function tx(action,okMsg,onOk){
+  if(!session)return kit.login().then(r=>{session=r.session;load()}).catch(()=>{});
+  try{await session.transact({actions:Array.isArray(action)?action:[action]});onOk&&onOk();render();toast(okMsg);poll()}
+  catch(e){toast(String(e.message||e).replace(/^.*assertion failure with message: /,""),true)}
+}
+const auth=()=>[session.permissionLevel];
+
+document.addEventListener("click",async e=>{
+  const t=e.target.closest("button,[data-id],[data-act]"); if(!t)return;
+  if(t.dataset.board){sbSel=t.dataset.board;render();return}
+  if(t.dataset.act==="getpts"){e.preventDefault();openShop();return}
+  if(t.dataset.id){if(dragged)return;const id=+t.dataset.id;if(selMode){toggleMulti(id);return}focusLand(id);return}
+  if(t.dataset.bulk){openBulk(t.dataset.bulk);return}
+  if(t.id==="bulkClear"){clearMulti();return}
+  if(t.dataset.unsel){multi.delete(+t.dataset.unsel);if(!multi.size){selMode=false;setHover(null);closeBulk()}else renderBulk();render();return}
+  if(t.id==="bulkGo"){const k=bulkKind,me=String(session.actor);
+    if(k==="rem"){const ls=eligFor("rem").filter(l=>l.lc+DAY-Date.now()<=0);if(!ls.length)return;
+      tx(ls.map(l=>({account:CONTRACT,name:"claim",authorization:auth(),data:{claimant:me,landid:l.landid}})),`Removed ${ls.length} reservation${ls.length>1?"s":""}.`,()=>{closeBulk();clearMulti()});return}
+    const ins=[...$("bulkUI").querySelectorAll("input[data-b]")];
+    tx(ins.map(el=>({account:CONTRACT,name:"capture",authorization:auth(),data:{captor:me,landid:+el.dataset.b,points:Math.floor(+el.value)}})),`${k==="cap"?"Captured":"Reserved"} ${ins.length} land${ins.length>1?"s":""}!`,()=>{closeBulk();clearMulti()});return}
+  if(cfDone&&(t.id==="cfYes"||t.id==="cfNo")){cfDone(t.id==="cfYes");return}
+  if(t.dataset.stab)return;
+  if(t.id==="stakeBtn"){openStake();return}
+  if(t.id==="stakeClose"){closeStake();return}
+  if(t.id==="menuBtn"){setMenu(!menuOpen);return}
+  if(t.id==="menuPts"){openShop();return}
+  if(t.id==="closeInfo"){overview();return}
+  if(t.id==="shopClose"){closeShop();return}
+  if(t.dataset.shop){setShopTab(t.dataset.shop);return}
+  if(t.id==="loginBtn"){try{session=(await kit.login()).session;await load()}catch{}}
+  if(t.id==="logoutBtn"){await kit.logout(session);session=null;player={points:0};render()}
+  if(t.dataset.claim)tx({account:CONTRACT,name:"claim",authorization:auth(),data:{claimant:String(session.actor),landid:+t.dataset.claim}},"Reward claimed!");
+  if(t.id==="bellBtn"){setNotif(!notifOpen)}
+  if(t.id==="ackBtn"){if(!notifMustAck()){setNotif(false,true);return}
+    const cl=lands.filter(claimable),me=String(session.actor);
+    tx([...cl.map(l=>({account:CONTRACT,name:"claim",authorization:auth(),data:{claimant:me,landid:l.landid}})),{account:CONTRACT,name:"clearnotifs",authorization:auth(),data:{name:me}}],
+      cl.length?`Claimed ${cl.length} land${cl.length>1?"s":""} and cleared your notifications!`:"Notifications cleared.",()=>{notifs=[];setNotif(false,true)})}
+  if(t.id==="unresBtn"){const l=lands.find(x=>x.landid===sel);if(!l)return;const fee=Math.max(0,l.points-l.chargeback);
+    const ok=await confirmBox({title:"Remove your reservation?",ok:"Yes, remove it",lit:[$("info")],html:`<p>You'll get <b>${fmt(l.chargeback)} points</b> back for land #${l.landid} (you staked ${fmt(l.points)}; ${fmt(fee)} went to the PESOLAR stakers' reward pool). The spot becomes free for anyone to reserve.</p>`});if(!ok)return;
+    tx({account:CONTRACT,name:"claim",authorization:auth(),data:{claimant:String(session.actor),landid:l.landid}},"Reservation removed.",()=>overview())}
+  if(t.id==="capBtn"){const l=lands.find(x=>x.landid===sel),p=+$("capIn").value,me=String(session.actor);
+    const back=newChargeback(l,p), res=shownRes(l)/10, empty=shownRes(l)===0, prev=shownOwner(l)!=="none", fee=Math.max(0,prev?p-prevGets(l,p)-(back-l.chargeback):p-back), fresh=priceWAX&&Date.now()-priceAt<60000, tok=++cfTok;
+    const note=empty?`<div class="note">This land is empty right now. Reserve it, and if a reward drop picks it, the pile is yours and your 24-hour timer restarts. You can remove your reservation after 24 hours and get your points back.</div>`:
+      `<div class="note">This land holds about <b>${fmtN(res)} PESOLAR</b><span id="cfWorth">, worth roughly <span id="cfWax">${fresh?`<b>${fmtN(res*priceWAX)} WAX</b>`:'<i class="spin" role="status" aria-label="Loading the price"></i>'}</span> at Alcor's price<span id="cfPx">${fresh?` (${priceWAX} WAX per PESOLAR)`:""}</span></span>.
+       Resources keep building up on a land over time, so you can also wait and let it accumulate before reserving it. If you reserve it now, you collect whatever it holds (plus what it gains while you hold it) when you claim.</div>`;
+    const pr=confirmBox({title:`Reserve land #${l.landid}?`,ok:"Reserve",lit:[$("info")],html:
+      `<p>You'll stake <b>${fmt(p)} points</b>.${prev?` The previous owner gets ${fmt(prevGets(l,p))} back (their stake plus a bonus).`:""} You get <b>${fmt(back)} points back</b> when you claim, and <b>${fmt(fee)}</b> go to the PESOLAR stakers' reward pool.</p>
+       <p class="hint" style="margin:0 0 6px">If someone outbids you, you get your points back plus a bonus (40% of what they add on top).</p>`+note});
+    if(!empty&&!fresh)withTimeout(getPrice(),8000).then(px=>{const w=$("cfWorth");if(!w||tok!==cfTok||$("confirm").hidden)return;
+      if(px){$("cfWax").innerHTML=`<b>${fmtN(res*px)} WAX</b>`;$("cfPx").textContent=` (${px} WAX per PESOLAR)`}else w.textContent=" (the Alcor price couldn't be loaded)"});
+    const ok=await pr;
+    if(!ok)return;
+    const patch={owner:me,points:p,chargeback:newChargeback(l,p),lc:Date.now(),resources:isExpired(l)?0:l.resources};
+    tx({account:CONTRACT,name:"capture",authorization:auth(),data:{captor:me,landid:sel,points:p}},"Spot reserved!",()=>{pending={id:sel,patch,pp:Math.max(0,(player.points||0)-p),until:Date.now()+40000};applyPending();overview()})}
+  if(t.id==="buyWaxBtn"){const n=Math.floor(+$("waxIn").value);if(n<1)return toast("Enter a whole WAX amount.",true);
+    tx({account:"eosio.token",name:"transfer",authorization:auth(),data:{from:String(session.actor),to:CONTRACT,quantity:n.toFixed(8)+" WAX",memo:"buypoints"}},"Points added!")}
+  if(t.id==="buyPesBtn"){const n=Math.floor(+$("pesIn").value);if(!(n>=1))return toast("Enter how many points to buy.",true);
+    const pl=buyPlan(n);tx({account:CONTRACT,name:"transfer",authorization:auth(),data:{from:String(session.actor),to:CONTRACT,quantity:pesStr(pl.raw),memo:`buypoints:${n}`}},"Points added!",()=>{$("pesIn").value=""})}
+  if(t.id==="sellBtn"){const p=Math.floor(+$("sellPts").value),me=String(session.actor);
+    tx({account:CONTRACT,name:"sellorder",authorization:auth(),data:{account:me,points:String(p),cost:String(rawC($("sellCost").value))}},"Your points are on sale!",()=>{$("sellPts").value="";$("sellCost").value=""})}
+  if(t.id==="claimEarnBtn"){const me=String(session.actor);tx({account:CONTRACT,name:"claimearning",authorization:auth(),data:{account:me}},"Earnings claimed!")}
+  if(t.id==="editCostBtn"){const c=rawC($("osNewCost").value),me=String(session.actor);tx({account:CONTRACT,name:"editcost",authorization:auth(),data:{account:me,cost:String(c)}},"Price changed.",()=>{$("osNewCost").value=""})}
+  if(t.id==="stackBtn"){const m=Math.floor(+$("osMore").value),me=String(session.actor);tx({account:CONTRACT,name:"stackpoints",authorization:auth(),data:{account:me,points:String(m)}},"Points added to your order.",()=>{$("osMore").value=""})}
+  if(t.id==="removeOrderBtn"){const me=String(session.actor),o=orders.find(x=>x.name===me);if(!o)return;
+    const ok=await confirmBox({title:"Remove your sell order?",ok:"Yes, remove it",html:`<p>The <b>${fmt(o.stock)} unsold points</b> go back to you${o.pending?`, and your <b>${fmt1(o.pending/1e6)} PESOLAR</b> of earnings are paid out`:""}. The 10% fee you paid is not refunded.</p>`});if(!ok)return;
+    tx({account:CONTRACT,name:"removeorder",authorization:auth(),data:{account:me}},"Order removed.")}
+  if(t.id==="regBtn"){const add=Math.floor(+$("regIn").value),st=myState();
+    const cur=st.onWin&&!st.onWin.forf?st.onWin.locked:0,avail=Math.max(0,myPesRaw-st.lockedRaw)/1e6;
+    if(st.onWin&&st.onWin.forf)return toast("You unlocked early from this board, so you can't lock into it again.",true);
+    if(!(add>=1))return toast("Enter how many PESOLAR to add.",true);
+    if(add>avail)return toast(`You only have ${fmt(avail)} PESOLAR available.`,true);
+    const n=cur+add,board=st.active,end=board?board.payout:nextPayoutMs(st.now),elsewhere=Math.max(0,st.lockedNow-cur);
+    const pool=board?board.reward:bankP,me=String(session.actor);
+    const others=(board?stakers.filter(r=>String(r.board_id)===board.id&&!+r.forfeit&&r.name!==me):[]).map(r=>({n:r.name,l:+r.locked}));
+    const mine=calcEst(pool,[...others,{n:me,l:n*1e6}]).find(o=>o.n===me),est=mine.tie?mine.base:mine.est;
+    const extra=mine.first&&mine.bonus?(mine.tie?` (plus ${fmt(mine.bonus)} leftover if you claim first among equals)`:` (you'd be first place, so that includes ${fmt(mine.bonus)} leftover point${mine.bonus>1?"s":""})`):"";
+    const ok=await confirmBox({title:"Lock PESOLAR?",ok:`Yes, lock ${fmt(add)} PESOLAR`,html:
+      `<p>Are you sure you want to lock <b>${fmt(add)} more PESOLAR</b>? You won't be able to send any of it until the payout date${board?"":", and your lock starts a new board"}.</p>
+       <div class="row"><span>Locked in this board now</span><b>${fmt(cur)} PESOLAR</b></div>
+       <div class="row"><span>Adding</span><b>${fmt(add)} PESOLAR</b></div>
+       <div class="row"><span>Will be locked in this board</span><b>${fmt(n)} PESOLAR</b></div>
+       ${elsewhere?`<div class="row"><span>Also locked in other boards</span><b>${fmt(elsewhere)} PESOLAR</b></div>`:""}
+       <div class="row"><span>Locked until</span><b>${dateStr(end)}</b></div>
+       <div class="note">After that date you can claim your share of the board's reward pool, within one year. Right now your share would be about <b>${fmt(est)} points</b>${extra} out of ${fmt(pool)} (it changes as other people lock).</div>
+       <p>If you unlock early, your PESOLAR is freed right away, but you give up your share of this board's reward pool and you can't lock into this board again.</p>`});
+    if(!ok)return;
+    tx({account:CONTRACT,name:"lock",authorization:auth(),data:{account:String(session.actor),amount:String(BigInt(n)*1000000n)}},"Locked "+fmt(n)+" PESOLAR in this board.",()=>{$("regIn").value="";regTouched=false})}
+  if(t.id==="unregBtn"){const {row,show}=boardSel();if(!row)return;
+    if(row.running&&!row.forf){const ok=await confirmBox({title:"Unlock PESOLAR?",ok:"Yes, unlock",html:
+      `<p>Are you sure you want to unlock? Your <b>${fmt(row.locked)} PESOLAR</b> in the ${shortDate(show.payout)} board will be unlocked, but you won't be able to lock into that board again.</p>
+       <div class="note">You will also give up your share of that board's reward pool.</div>`});if(!ok)return}
+    tx({account:CONTRACT,name:"unlock",authorization:auth(),data:{account:String(session.actor),board_id:row.id}},row.fin&&!row.forf?"Share claimed!":row.forf?"Old lock removed.":"Unlocked. You've left that board.")}
+  if(t.id==="claimPtsBtn"){const {row}=boardSel();if(!row)return;tx({account:CONTRACT,name:"claimpoints",authorization:auth(),data:{account:String(session.actor),board_id:row.id}},"Share claimed!")}
+});
+document.addEventListener("input",e=>{
+  if(e.target.id==="capIn"){const l=lands.find(x=>x.landid===sel),p=+e.target.value;$("capCb").textContent=fmt(newChargeback(l,p));checkPts()}
+  if(e.target.id==="pesIn")pesCost();
+  if(["sellPts","sellCost","osMore","osNewCost"].includes(e.target.id))sellPanel();
+  if(e.target.id==="regIn"){regTouched=true;poolPanel()}
+  if(e.target.id==="waxIn")shopMax();
+  if(e.target.id==="bulkSame"){bulkSame=e.target.checked;renderBulk()}
+  if(e.target.closest&&e.target.closest("#bulkUI")&&e.target.dataset&&e.target.dataset.b)bulkRefresh();
+});
+
+const ptrs=new Map();let pinch=null;
+$("stage").addEventListener("gesturestart",e=>e.preventDefault());
+$("stage").addEventListener("pointerdown",e=>{if(!booted)return;
+  ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(ptrs.size===2){clearTimeout(lpTimer);drag=null;dragged=true;const [a,b]=[...ptrs.values()];pinch={d0:Math.hypot(a.x-b.x,a.y-b.y)||1,base:{...view},cx:(a.x+b.x)/2,cy:(a.y+b.y)/2};return}   // two fingers: pinch
+  if(ptrs.size>2)return;
+  if(sel!==null&&!e.target.closest(".tile.sel")){overview();drag=null;dragged=true;return}   // a click or drag outside the land panel closes it
+  {const te=e.target.closest("[data-id]");clearTimeout(lpTimer);if(te&&sel===null&&!bulkKind&&!selMode)lpTimer=setTimeout(()=>{dragged=true;drag=null;selMode=true;multi.add(+te.dataset.id);render()},550)}   // press and hold a land: selection mode
+  drag={x:e.clientX,y:e.clientY,vx:view.x,vy:view.y};dragged=false});
+addEventListener("pointermove",e=>{
+  if(ptrs.has(e.pointerId))ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pinch&&ptrs.size>=2){const [a,b]=[...ptrs.values()],d=Math.hypot(a.x-b.x,a.y-b.y)||1,f=Math.max(.35,Math.min(3.2,d/pinch.d0)),mx=(a.x+b.x)/2,my=(a.y+b.y)/2;
+    view={s:pinch.base.s*f,x:mx-(pinch.cx-pinch.base.x)*f,y:my-(pinch.cy-pinch.base.y)*f};applyView(false);return}   // zoom around the fingers
+  if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(Math.abs(dx)+Math.abs(dy)>6&&!dragged){clearTimeout(lpTimer);dragged=true;if(sel!==null){overview();drag=null;return}}
+  if(dragged){view.x=drag.vx+dx;view.y=drag.vy+dy;applyView(false)}});
+const endPtr=e=>{ptrs.delete(e.pointerId);clearTimeout(lpTimer);
+  if(pinch&&ptrs.size<2){const b=pinch.base;pinch=null;view={...b};applyView(true,380)}   // let go: back to the normal zoom
+  drag=null;setTimeout(()=>dragged=false,0)};
+addEventListener("pointerup",endPtr);addEventListener("pointercancel",endPtr);
+addEventListener("keydown",e=>{if(e.key==="Escape"&&!closeTop()){if(selMode)clearMulti();else if(sel!==null)overview()}});
+$("bulkBar").addEventListener("mouseover",e=>{const b=e.target.closest("[data-bulk]");setHover(b&&!b.disabled?b.dataset.bulk:null)});
+$("bulkBar").addEventListener("mouseleave",()=>setHover(null));
+$("dim").addEventListener("click",closeTop);
+addEventListener("resize",()=>{if(booted)sel?focusLand(sel):overview()});
+/* ---------- boot: autologin ---------- */
+(async()=>{
+  view={s:0,x:innerWidth/2,y:innerHeight/2};applyView(false);   // the map starts at 0px and grows once the data is in
+  getPrice();
+  try{session=await kit.restore()}catch{}   // restores last wallet session automatically
+  try{await load()}finally{booted=true;overview(900)}
+  if(!session)setMenu(true);else if(notifMustAck())setNotif(true);
+  if(session)toast("Welcome back, "+session.actor+"!");
+  setInterval(load,60000);
+  document.addEventListener("visibilitychange",()=>{if(!document.hidden)load()});
+})();
+</script>
+</body>
+</html>
